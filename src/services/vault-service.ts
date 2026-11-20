@@ -17,6 +17,8 @@ import {
 import { EditorView } from "@codemirror/view";
 import { Compartment, StateEffect } from "@codemirror/state";
 import { getLogger, Logger } from "../utils/logger";
+import type { SourceSnapshot, TextRange } from "../types/note-companion";
+import { extractSelection } from "../utils/selection";
 import {
 	getNoteWikiLinks,
 	type IWikilinkResolver,
@@ -68,6 +70,8 @@ export interface NoteMetadata {
 	selection?: {
 		from: EditorPosition;
 		to: EditorPosition;
+		text?: string;
+		range?: TextRange;
 	};
 }
 
@@ -146,7 +150,8 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 
 	private currentSelection: {
 		filePath: string;
-		selection: { from: EditorPosition; to: EditorPosition };
+		selection: NonNullable<NoteMetadata["selection"]>;
+		snapshot?: SourceSnapshot & { range: TextRange };
 	} | null = null;
 	private selectionListeners = new Set<() => void>();
 	private activeLeafRef: EventRef | null = null;
@@ -318,6 +323,30 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 		return Promise.resolve(metadata);
 	}
 
+	async captureActiveSelection(): Promise<
+		(SourceSnapshot & { range: TextRange }) | null
+	> {
+		const view =
+			this.plugin.app.workspace.getActiveViewOfType(MarkdownView);
+		if (view?.file && view.getMode() === "source") {
+			const selection = view.editor.listSelections()[0];
+			if (!selection) return null;
+			const text = view.editor.getValue();
+			const { range } = extractSelection(
+				text,
+				selection.anchor,
+				selection.head ?? selection.anchor,
+			);
+			return range.start < range.end
+				? { path: view.file.path, text, range, capturedAt: Date.now() }
+				: null;
+		}
+		const note = await this.getActiveNote();
+		return note && this.currentSelection?.filePath === note.path
+			? (this.currentSelection.snapshot ?? null)
+			: null;
+	}
+
 	/**
 	 * List all markdown notes in the vault.
 	 *
@@ -425,20 +454,28 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 		}
 
 		const emitSelection = () => {
+			if (view.getMode() !== "source") {
+				this.handleSelectionChange(filePath, null);
+				return;
+			}
 			if (editor.somethingSelected()) {
 				const selections = editor.listSelections();
 				if (selections.length > 0) {
 					const normalized = this.normalizeSelection(selections[0]);
-					this.handleSelectionChange(filePath, {
-						from: {
-							line: normalized.anchor.line,
-							ch: normalized.anchor.ch,
+					this.handleSelectionChange(
+						filePath,
+						{
+							from: {
+								line: normalized.anchor.line,
+								ch: normalized.anchor.ch,
+							},
+							to: {
+								line: normalized.head.line,
+								ch: normalized.head.ch,
+							},
 						},
-						to: {
-							line: normalized.head.line,
-							ch: normalized.head.ch,
-						},
-					});
+						editor.getValue(),
+					);
 					return;
 				}
 			}
@@ -479,7 +516,7 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 				effects: StateEffect.appendConfig.of(
 					compartment.of(
 						EditorView.updateListener.of((update) => {
-							if (update.selectionSet) {
+							if (update.selectionSet || update.docChanged) {
 								emitSelection();
 							}
 						}),
@@ -510,6 +547,7 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 	private handleSelectionChange(
 		filePath: string | null,
 		selection: { from: EditorPosition; to: EditorPosition } | null,
+		buffer?: string,
 	): void {
 		const selectionKey = filePath
 			? selection
@@ -517,16 +555,32 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 				: `${filePath}:none`
 			: "none";
 
-		if (selectionKey === this.lastSelectionKey) {
+		if (
+			selectionKey === this.lastSelectionKey &&
+			buffer === this.currentSelection?.snapshot?.text
+		) {
 			return;
 		}
 
 		this.lastSelectionKey = selectionKey;
 
 		if (filePath && selection) {
+			const excerpt =
+				buffer === undefined
+					? undefined
+					: extractSelection(buffer, selection.from, selection.to);
 			this.currentSelection = {
 				filePath,
-				selection,
+				selection: { ...selection, ...excerpt },
+				snapshot:
+					buffer !== undefined && excerpt
+						? {
+								path: filePath,
+								text: buffer,
+								range: excerpt.range,
+								capturedAt: Date.now(),
+							}
+						: undefined,
 			};
 		} else if (
 			this.currentSelection &&

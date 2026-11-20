@@ -14,11 +14,7 @@
 
 import type { AcpClient } from "../acp/acp-client";
 import { getLogger } from "../utils/logger";
-import type {
-	IVaultAccess,
-	NoteMetadata,
-	EditorPosition,
-} from "../services/vault-service";
+import type { IVaultAccess, NoteMetadata } from "../services/vault-service";
 import { AcpErrorCode, type AcpError } from "../types/errors";
 import {
 	extractErrorCode,
@@ -42,6 +38,7 @@ import {
 	type LineRange,
 } from "../utils/wikilink-resolver";
 import { formatLinkedNotesBlock } from "../utils/wikilink-formatter";
+import { extractSelection, truncateText } from "../utils/selection";
 
 // ============================================================================
 // Types
@@ -231,7 +228,7 @@ async function processNote(
  */
 async function readSelection(
 	notePath: string,
-	selection: { from: EditorPosition; to: EditorPosition },
+	selection: NonNullable<NoteMetadata["selection"]>,
 	vaultAccess: IVaultAccess,
 	maxSelectionLength: number,
 ): Promise<{
@@ -240,20 +237,17 @@ async function readSelection(
 	originalLength: number;
 } | null> {
 	try {
-		const content = await vaultAccess.readNote(notePath);
-		const lines = content.split("\n");
-		const selectedLines = lines.slice(
-			selection.from.line,
-			selection.to.line + 1,
-		);
-		const fullText = selectedLines.join("\n");
-		const wasTruncated = fullText.length > maxSelectionLength;
-
+		const fullText =
+			selection.text ??
+			extractSelection(
+				await vaultAccess.readNote(notePath),
+				selection.from,
+				selection.to,
+			).text;
+		const text = truncateText(fullText, maxSelectionLength);
 		return {
-			text: wasTruncated
-				? fullText.substring(0, maxSelectionLength)
-				: fullText,
-			wasTruncated,
+			text,
+			wasTruncated: text.length < fullText.length,
 			originalLength: fullText.length,
 		};
 	} catch (error) {
@@ -720,7 +714,7 @@ async function buildAutoMentionResource(
 
 		const text = sel.wasTruncated
 			? sel.text +
-				`\n\n[Note: Truncated from ${sel.originalLength} to ${maxSelectionLength} characters]`
+				`\n\n[Note: Truncated from ${sel.originalLength} to ${sel.text.length} UTF-16 units]`
 			: sel.text;
 
 		const blocks: PromptContent[] = [
@@ -772,7 +766,7 @@ async function buildAutoMentionTextContext(
 	vaultPath: string,
 	vaultAccess: IVaultAccess,
 	convertToWsl: boolean,
-	selection: { from: EditorPosition; to: EditorPosition } | undefined,
+	selection: NoteMetadata["selection"],
 	maxSelectionLength: number,
 	wikilinkCtx: WikilinkScanContext | null,
 ): Promise<string[]> {
@@ -795,7 +789,7 @@ async function buildAutoMentionTextContext(
 		}
 
 		const truncationNote = sel.wasTruncated
-			? `\n\n[Note: The selection was truncated. Original length: ${sel.originalLength} characters, showing first ${maxSelectionLength} characters]`
+			? `\n\n[Note: The selection was truncated. Original length: ${sel.originalLength} UTF-16 units, showing first ${sel.text.length}]`
 			: "";
 
 		const openedNote = `<obsidian_opened_note selection="lines ${fromLine}-${toLine}">
