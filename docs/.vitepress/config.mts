@@ -1,6 +1,7 @@
 import { defineConfig } from "vitepress";
 
 export default defineConfig({
+  srcExclude: ["superpowers/**"],
   title: "Agent Client",
   description:
     "Obsidian plugin for AI agent integration - Chat with Claude Code, Codex, Gemini CLI and more",
@@ -88,6 +89,7 @@ export default defineConfig({
           { text: "Chat Export", link: "/usage/chat-export" },
           { text: "Commands & Hotkeys", link: "/usage/commands" },
           { text: "Context Files", link: "/usage/context-files" },
+          { text: "Note Companion", link: "/usage/note-companion" },
           { text: "Prompt Injection", link: "/usage/prompt-injection" },
           { text: "MCP Tools", link: "/usage/mcp-tools" },
         ],

@@ -96,8 +96,8 @@ it("failed_initialize_releases_only_owned_resources and ignores late old-process
 	expect(client.isInitialized()).toBe(true);
 	expect(successor.request).toHaveBeenCalledWith(
 		"initialize",
-		expect.objectContaining({
-			clientCapabilities: expect.objectContaining({
+		matching({
+			clientCapabilities: matching({
 				fs: { readTextFile: false, writeTextFile: false },
 			}),
 		}),
@@ -122,3 +122,7 @@ it.each([false, true])(
 		expect(client.isInitialized()).toBe(false);
 	},
 );
+
+function matching(fields: Record<string, unknown>): unknown {
+	return expect.objectContaining(fields) as unknown;
+}

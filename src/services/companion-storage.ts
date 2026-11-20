@@ -100,7 +100,7 @@ function assertState(
 				(item.annotation === undefined || str(item.annotation)) &&
 				(item.status === undefined ||
 					["changed", "missing", "renamed"].includes(
-						String(item.status),
+						typeof item.status === "string" ? item.status : "",
 					)),
 		) ||
 		!Array.isArray(value.operations) ||
@@ -134,7 +134,7 @@ function filename(sessionId: string): string {
 	if (
 		!sessionId ||
 		sessionId.length > 96 ||
-		/[\u0000-\u001f]/.test(sessionId)
+		Array.from(sessionId).some((c) => c.charCodeAt(0) < 32)
 	)
 		throw new Error("Invalid companion session ID");
 	const bytes = new TextEncoder().encode(sessionId);

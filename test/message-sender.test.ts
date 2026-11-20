@@ -57,9 +57,13 @@ it("dispatch uses the captured editor selection without rereading disk", async (
 		{} as never,
 	);
 	expect(result.agentContent).toContainEqual(
-		expect.objectContaining({
-			resource: expect.objectContaining({ text: "TARGET" }),
+		matching({
+			resource: matching({ text: "TARGET" }),
 		}),
 	);
 	expect(readNote).not.toHaveBeenCalled();
 });
+
+function matching(fields: Record<string, unknown>): unknown {
+	return expect.objectContaining(fields) as unknown;
+}

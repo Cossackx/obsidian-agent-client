@@ -21,22 +21,25 @@ export function assertRange(range: TextRange, text: string): void {
 export function isNotePath(path: string): boolean {
 	return (
 		/\.md$/i.test(path) &&
-		!/[:\\\u0000-\u001f]/.test(path) &&
-		path
-			.split("/")
-			.every(
-				(part) =>
-					part &&
-					part !== "." &&
-					part !== ".." &&
-					part.toLowerCase() !== ".obsidian",
-			)
+		!path.includes(":") &&
+		!path.includes(String.fromCharCode(92)) &&
+		!Array.from(path).some((c) => c.charCodeAt(0) < 32) &&
+		path.split("/").every(
+			(part) =>
+				part &&
+				part !== "." &&
+				part !== ".." &&
+				!/[. ]$/.test(part) &&
+				!/[<>"|?*]/.test(part) &&
+				!/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part) &&
+				// Always reserve the stock configuration segment, even in a custom-config vault.
+				// eslint-disable-next-line obsidianmd/hardcoded-config-path
+				part.toLowerCase() !== ".obsidian",
+		)
 	);
 }
 
-export function headingRanges(
-	text: string,
-): {
+export function headingRanges(text: string): {
 	heading: string;
 	occurrence: number;
 	range: TextRange;

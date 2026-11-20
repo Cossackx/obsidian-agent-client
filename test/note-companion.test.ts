@@ -114,8 +114,8 @@ it("preview_blocks_are_the_sent_blocks and destination-only bodies are excluded"
 		prepared.blocks,
 	);
 	expect(outbound.agentContent).toContainEqual(
-		expect.objectContaining({
-			resource: expect.objectContaining({ text: "🐙\r\nTARGET" }),
+		matching({
+			resource: matching({ text: "🐙\r\nTARGET" }),
 		}),
 	);
 	expect(JSON.stringify(outbound.agentContent)).not.toMatch(
@@ -255,7 +255,7 @@ function actionsFixture() {
 		storage,
 		adapter,
 		vault,
-		service: new NoteActionService(vault as never, storage),
+		service: new NoteActionService(vault, storage),
 		text: () => text,
 		edit: (next: string) => {
 			text = next;
@@ -418,3 +418,7 @@ it("history_is_not_connection; authorization prompts and failures are distinct",
 		}),
 	).toBe("needs-approval");
 });
+
+function matching(fields: Record<string, unknown>): unknown {
+	return expect.objectContaining(fields) as unknown;
+}

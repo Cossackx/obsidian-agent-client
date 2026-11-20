@@ -33,8 +33,8 @@ it.each(["allow_always", "unknown", "reject_once", undefined])(
 			outcome: { outcome: "cancelled" },
 		});
 		expect(update).toHaveBeenCalledWith(
-			expect.objectContaining({
-				permissionRequest: expect.objectContaining({ isActive: true }),
+			matching({
+				permissionRequest: matching({ isActive: true }),
 			}),
 		);
 	},
@@ -46,3 +46,7 @@ it("rejects an empty option list explicitly", async () => {
 		/no permission options/i,
 	);
 });
+
+function matching(fields: Record<string, unknown>): unknown {
+	return expect.objectContaining(fields) as unknown;
+}

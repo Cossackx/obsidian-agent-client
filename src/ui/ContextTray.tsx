@@ -32,6 +32,7 @@ import {
 } from "../services/synthesis-request";
 import { NoteActionModal } from "./NoteActionModal";
 import { useChatContext } from "./ChatContext";
+import { getVaultDragFiles } from "../utils/vault-drag";
 
 export interface StructuredTurn {
 	text: string;
@@ -78,6 +79,8 @@ export function ContextTray({
 	busy,
 	send,
 	openContinuity,
+	activePath,
+	previewNext,
 }: {
 	companion: ReturnType<typeof useNoteCompanion>;
 	messages: ChatMessage[];
@@ -85,6 +88,8 @@ export function ContextTray({
 	busy: boolean;
 	send: (turn: StructuredTurn) => Promise<boolean>;
 	openContinuity: () => Promise<void>;
+	activePath?: string;
+	previewNext: () => Promise<boolean>;
 }) {
 	const { plugin, vaultService } = useChatContext();
 	const { app } = plugin;
@@ -112,6 +117,12 @@ export function ContextTray({
 		end: number;
 	} | null>(null);
 	const [createPath, setCreatePath] = React.useState("");
+	const [compact, setCompact] = React.useState(false);
+	const [synthesis, setSynthesis] = React.useState<{
+		id: string;
+		paths: string[];
+	} | null>(null);
+	const [template, setTemplate] = React.useState<SourceSnapshot | null>(null);
 	const [purpose, setPurpose] = React.useState<SynthesisPurpose>("synthesis");
 	const replies = messages.filter(
 		(row) =>
@@ -152,6 +163,41 @@ export function ContextTray({
 		text: await vaultService.readNote(path),
 		capturedAt: Date.now(),
 	});
+	const addPaths = async (
+		paths: string[],
+		role: "working" | "reference",
+		lifetime: "turn" | "session",
+	) => {
+		if (!sessionId) return;
+		const entries: ContextItem[] = await Promise.all(
+			[...new Set(paths)].map(async (path) => ({
+				id: crypto.randomUUID(),
+				source: await read(path),
+				role,
+				lifetime,
+				scope: { kind: "note" },
+			})),
+		);
+		if (current.current === sessionId)
+			await update((old) => entries.reduce(putItem, old));
+	};
+	const synthesize = async () => {
+		if (!state || !sessionId) return;
+		const paths = [
+			...new Set(
+				state.items
+					.filter((item) => item.role !== "destination")
+					.map((item) => item.source.path),
+			),
+		];
+		await send({
+			text: buildSynthesisPrompt(state.items, purpose),
+			onReply: () => {
+				if (current.current === sessionId)
+					setSynthesis({ id: sessionId, paths });
+			},
+		});
+	};
 	const openNotes = () => [
 		...new Set(
 			app.workspace.getLeavesOfType("markdown").flatMap((leaf) => {
@@ -403,7 +449,7 @@ export function ContextTray({
 			throw new Error(
 				"The captured destination heading no longer exists.",
 			);
-		const text = `${buildCapturePrompt(intent, reply.id, target)}\n${JSON.stringify({ reply: literal, section: section && original?.text.slice(section.bodyStart, section.range.end) })}`;
+		const text = `${buildCapturePrompt(intent, reply.id, target)}\n${JSON.stringify({ reply: literal, template: intent === "new-note" && template ? { path: template.path, text: template.text.slice(0, 10000) } : undefined, section: section && original?.text.slice(section.bodyStart, section.range.end) })}`;
 		await send({
 			text,
 			onReply: (result) => {
@@ -458,7 +504,28 @@ export function ContextTray({
 			}));
 	};
 	return (
-		<details className="xo-note-tray">
+		<details
+			className={
+				compact ? "xo-note-tray xo-note-compact" : "xo-note-tray"
+			}
+			onDragOver={(event) => {
+				if (!busy && state && getVaultDragFiles(app)?.notes.length)
+					event.preventDefault();
+			}}
+			onDrop={(event) => {
+				const notes = getVaultDragFiles(app)?.notes;
+				if (!state || working || busy || !notes?.length) return;
+				event.preventDefault();
+				event.stopPropagation();
+				run(() =>
+					addPaths(
+						notes.map((note) => note.path).filter(isNotePath),
+						"reference",
+						"turn",
+					),
+				);
+			}}
+		>
 			<summary>
 				Note companion
 				{state?.items.length ? ` · ${state.items.length} attached` : ""}
@@ -466,12 +533,47 @@ export function ContextTray({
 			{companion.warning && (
 				<p role="alert" className="xo-note-warning">
 					{companion.warning}{" "}
-					<button type="button" onClick={() => run(companion.retry)}>
+					<button
+						type="button"
+						onClick={() => run(() => companion.retry())}
+					>
 						Retry save or load
 					</button>
 				</p>
 			)}
 			{message && <p role="status">{message}</p>}
+			<div className="xo-note-row">
+				<button
+					type="button"
+					aria-pressed={compact}
+					onClick={() => setCompact(!compact)}
+				>
+					Compact tray
+				</button>
+				<button
+					type="button"
+					disabled={!canSend || busy || working}
+					onClick={() => run(previewNext)}
+				>
+					Preview next send
+				</button>
+			</div>
+			{state && activePath && (
+				<p>
+					Following active note: {activePath}{" "}
+					<button
+						type="button"
+						disabled={working || busy}
+						onClick={() =>
+							run(() =>
+								addPaths([activePath], "working", "session"),
+							)
+						}
+					>
+						Pin working note
+					</button>
+				</p>
+			)}
 			<div className="xo-note-row">
 				<button
 					type="button"
@@ -670,20 +772,101 @@ export function ContextTray({
 						<button
 							type="button"
 							disabled={!canSend || working || busy}
-							onClick={() =>
-								run(() =>
-									send({
-										text: buildSynthesisPrompt(
-											state.items,
-											purpose,
-										),
-									}),
-								)
-							}
+							onClick={() => run(synthesize)}
 						>
 							Bring these together
 						</button>
 					</div>
+					{synthesis && synthesis.id === sessionId && (
+						<div className="xo-note-chip">
+							<strong>Synthesis · not fact-verified</strong>
+							<p>Supplied sources:</p>
+							{synthesis.paths.map((path) => (
+								<button
+									key={path}
+									type="button"
+									onClick={() =>
+										run(async () => {
+											const file =
+												app.vault.getFileByPath(path);
+											if (!file || file.path !== path)
+												throw new Error(
+													"The exact source is no longer at this path",
+												);
+											await app.workspace
+												.getLeaf("tab")
+												.openFile(file);
+										})
+									}
+								>
+									{path}
+								</button>
+							))}
+						</div>
+					)}
+					<details>
+						<summary>Project actions</summary>
+						<div className="xo-note-row">
+							{(
+								[
+									[
+										"Brief me",
+										"Brief me on the selected project sources. Separate current state, decisions and next actions.",
+									],
+									[
+										"Challenge this plan",
+										"Challenge this plan using the selected sources. Identify assumptions, failure points and alternatives.",
+									],
+									[
+										"Where were we?",
+										"Generate a recap of this conversation: decisions, open issues and next actions. This recap is not the source of truth.",
+									],
+								] as const
+							).map(([label, text]) => (
+								<button
+									key={label}
+									type="button"
+									disabled={!canSend || working || busy}
+									onClick={() =>
+										run(() =>
+											send({
+												text:
+													text +
+													" Do not invoke tools or edit files.",
+												onReply: () => {
+													if (
+														current.current ===
+														sessionId
+													)
+														setMessage(
+															label +
+																": generated response, not independently verified.",
+														);
+												},
+											}),
+										)
+									}
+								>
+									{label}
+								</button>
+							))}
+							<button
+								type="button"
+								disabled={
+									!canSend ||
+									working ||
+									busy ||
+									!reply ||
+									state.destination?.kind !== "heading"
+								}
+								onClick={() =>
+									run(() => editorial("merge-section"))
+								}
+							>
+								Update the brief
+							</button>
+						</div>
+					</details>
 					{proposals?.sessionId === sessionId &&
 						proposals?.rows.map(({ proposal, comment }) => (
 							<div key={proposal.id} className="xo-note-chip">
@@ -835,6 +1018,36 @@ export function ContextTray({
 								</div>
 								<details>
 									<summary>Editorial capture</summary>
+									<button
+										type="button"
+										disabled={busy || working}
+										onClick={() =>
+											run(async () => {
+												const path = await choose(
+													app,
+													"Choose an open Markdown template (optional)",
+													openNotes().map((path) => ({
+														label: path,
+														value: path,
+													})),
+												);
+												if (path)
+													setTemplate(
+														await read(path),
+													);
+											})
+										}
+									>
+										Choose template
+									</button>
+									{template && (
+										<button
+											type="button"
+											onClick={() => setTemplate(null)}
+										>
+											Clear template: {template.path}
+										</button>
+									)}
 									<label>
 										New note vault path{" "}
 										<input

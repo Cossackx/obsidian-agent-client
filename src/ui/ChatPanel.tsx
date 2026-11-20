@@ -1794,6 +1794,32 @@ export const ChatPanel = React.memo(function ChatPanel({
 			</details>
 			<ContextTray
 				companion={companion}
+				activePath={
+					settings.autoMentionActiveNote &&
+					!suggestions.mentions.isAutoMentionDisabled
+						? suggestions.mentions.activeNote?.path
+						: undefined
+				}
+				previewNext={async () => {
+					const text = inputValueRef.current;
+					const files = attachedFilesRef.current;
+					if (!text.trim() && !files.length) {
+						new Notice(
+							"Enter a draft to preview the full outbound turn.",
+						);
+						return false;
+					}
+					const ok = await sendCurrentRef.current(text.trim(), files);
+					if (
+						ok &&
+						inputValueRef.current === text &&
+						attachedFilesRef.current === files
+					) {
+						updateDraftRef.current("");
+						setAttachedFiles([]);
+					}
+					return ok;
+				}}
 				messages={messages}
 				canSend={isSessionReady && !reconnecting}
 				busy={
@@ -1823,11 +1849,29 @@ export const ChatPanel = React.memo(function ChatPanel({
 						open: async (saved, resume) => {
 							companion.flush();
 							if (resume) {
-								await sessionHistory.restoreSession(
-									saved.sessionId,
-									saved.cwd,
-								);
-								return;
+								const alreadyOpen = plugin.viewRegistry
+									.getAll()
+									.find(
+										(view) =>
+											view.viewId !== viewId &&
+											view.getSessionId() ===
+												saved.sessionId,
+									);
+								if (alreadyOpen)
+									throw new Error(
+										"This conversation already has an open owner view",
+									);
+								try {
+									await sessionHistory.restoreSession(
+										saved.sessionId,
+										saved.cwd,
+									);
+									return;
+								} catch {
+									new Notice(
+										"Resume failed; opening local history without a connection.",
+									);
+								}
 							}
 							const history =
 								await plugin.settingsService.loadSessionMessages(

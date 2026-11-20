@@ -106,6 +106,21 @@ If your plugin does not need CSS, delete this file.
 	color: var(--text-error);
 }
 
+.xo-note-mount {
+	height: 100%;
+	min-height: 0;
+}
+.xo-note-move-placeholder,
+.xo-note-connection {
+	padding: var(--size-4-2);
+	color: var(--text-muted);
+}
+.xo-note-compact {
+	padding-block: var(--size-2-1);
+}
+.xo-note-compact .xo-note-chip {
+	margin-block: 0;
+}
 /* ===== Session Manager ===== */
 
 .agent-client-session-manager {
