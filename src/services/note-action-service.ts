@@ -81,7 +81,7 @@ export class NoteActionService {
 	): Promise<WriteReceipt> {
 		if (!proposalIsValid(proposal))
 			return Promise.reject(new Error("Invalid note proposal"));
-		const frozen = { ...proposal };
+		const frozen = structuredClone(proposal);
 		return this.enqueue(frozen.path, async () => {
 			const history =
 				(await this.storage.load(sessionId))?.operations ?? [];

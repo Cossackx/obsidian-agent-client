@@ -46,6 +46,8 @@ export const proposalIsValid = (value: unknown): value is NoteEditProposal =>
 	str(value.id) &&
 	value.id.length > 0 &&
 	path(value.path) &&
+	(value.target === undefined ||
+		(destination(value.target) && value.target.path === value.path)) &&
 	str(value.after) &&
 	str(value.sourceMessageId) &&
 	(value.mode === "create"

@@ -12,7 +12,10 @@ import {
 } from "../src/services/companion-state";
 import { CompanionStorage } from "../src/services/companion-storage";
 import { NoteActionService } from "../src/services/note-action-service";
-import { planLiteralEdit } from "../src/services/note-edit-planner";
+import {
+	describeNoteTarget,
+	planLiteralEdit,
+} from "../src/services/note-edit-planner";
 import {
 	createRevisionProposal,
 	parseStructuredReply,
@@ -262,6 +265,20 @@ function actionsFixture() {
 		},
 	};
 }
+it("persists the approved heading occurrence and reply in the write receipt", async () => {
+	const { service, storage } = actionsFixture();
+	const planned = proposal();
+	const completed = await service.apply("session-a", planned);
+	expect(completed.status).toBe("verified");
+	const row = (await storage.load("session-a"))?.operations[0];
+	expect(row?.proposal).toMatchObject({
+		target: planned.target,
+		sourceMessageId: "reply",
+	});
+	expect(describeNoteTarget(row!.proposal)).toBe(
+		`${path} > Team (occurrence 2)`,
+	);
+});
 it("duplicate_operation_writes_once and stale undo preserves intervening edits", async () => {
 	const { service, vault, text, edit } = actionsFixture();
 	const plan = proposal();

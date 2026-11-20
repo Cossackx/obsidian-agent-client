@@ -2,6 +2,7 @@ import { Modal } from "obsidian";
 import { computeDiffLines } from "../utils/diff-lines";
 import type { NoteEditProposal, WriteReceipt } from "../types/note-companion";
 import type AgentClientPlugin from "../plugin";
+import { describeNoteTarget } from "../services/note-edit-planner";
 
 export class NoteActionModal extends Modal {
 	private applying = false;
@@ -11,6 +12,7 @@ export class NoteActionModal extends Modal {
 		private proposal: NoteEditProposal,
 		private current: () => boolean,
 		private onReceipt: (receipt: WriteReceipt) => void,
+		private onUncertain: () => void,
 	) {
 		super(plugin.app);
 	}
@@ -22,7 +24,7 @@ export class NoteActionModal extends Modal {
 				: "Review note change",
 		);
 		contentEl.addClass("xo-note-modal");
-		contentEl.createEl("p", { text: proposal.path });
+		contentEl.createEl("p", { text: describeNoteTarget(proposal) });
 		const diff = contentEl.createEl("pre", { cls: "xo-note-diff" });
 		for (const line of computeDiffLines(
 			proposal.before ?? "",
@@ -74,6 +76,7 @@ export class NoteActionModal extends Modal {
 						);
 					},
 					() => {
+						this.onUncertain();
 						status.setText(
 							"Could not confirm the write or save its receipt. Inspect the note and reconcile the recorded operation before retrying.",
 						);

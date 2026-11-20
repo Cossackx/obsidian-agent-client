@@ -51,9 +51,21 @@ export function planLiteralEdit(
 	return {
 		id: crypto.randomUUID(),
 		path: target.path,
+		target: structuredClone(target),
 		before,
 		after,
 		mode,
 		sourceMessageId,
 	};
+}
+
+export function describeNoteTarget(proposal: NoteEditProposal): string {
+	const { path, target } = proposal;
+	if (target?.kind === "heading")
+		return `${path} > ${target.heading} (occurrence ${target.occurrence})`;
+	if (target?.kind === "range")
+		return `${path} (offsets ${target.range.start}–${target.range.end})`;
+	return proposal.mode === "append" && target?.kind === "end"
+		? `${path} (end of note)`
+		: path;
 }

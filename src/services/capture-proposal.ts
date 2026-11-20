@@ -73,5 +73,13 @@ export function validateCaptureProposal(
 		(/[\r\n]$/.test(normalized) ? "" : eol) +
 		before.slice(heading.range.end);
 	if (before === after) throw new Error("The proposal has no changes");
-	return { id, path, mode: "replace", before, after, sourceMessageId };
+	return {
+		id,
+		path,
+		target: structuredClone(target),
+		mode: "replace",
+		before,
+		after,
+		sourceMessageId,
+	};
 }

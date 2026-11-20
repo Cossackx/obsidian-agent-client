@@ -30,6 +30,7 @@ export type DestinationAnchor =
 export interface NoteEditProposal {
 	id: string;
 	path: string;
+	target?: DestinationAnchor;
 	mode: "append" | "insert" | "replace" | "create";
 	before: string | null;
 	after: string;

@@ -14,7 +14,11 @@ import {
 	headingRanges,
 	isNotePath,
 } from "../services/context-builder";
-import { planLiteralEdit } from "../services/note-edit-planner";
+import {
+	describeNoteTarget,
+	planLiteralEdit,
+} from "../services/note-edit-planner";
+import { computeDiffLines } from "../utils/diff-lines";
 import {
 	type CaptureIntent,
 	buildCapturePrompt,
@@ -38,6 +42,27 @@ export interface StructuredTurn {
 	text: string;
 	items?: readonly ContextItem[];
 	onReply?: (reply: string, id: string) => void;
+}
+
+function ReceiptDetails({ proposal }: { proposal: NoteEditProposal }) {
+	const [expanded, setExpanded] = React.useState(false);
+	return (
+		<details onToggle={(event) => setExpanded(event.currentTarget.open)}>
+			<summary>Change and source</summary>
+			<small>Source reply: {proposal.sourceMessageId}</small>
+			{expanded && (
+				<pre>
+					{computeDiffLines(proposal.before ?? "", proposal.after)
+						.filter((line) => line.type !== "context")
+						.map(
+							(line) =>
+								`${line.type === "added" ? "+" : "−"} ${line.content}`,
+						)
+						.join("\n")}
+				</pre>
+			)}
+		</details>
+	);
 }
 
 function choose<T>(
@@ -323,7 +348,15 @@ export function ContextTray({
 			proposal,
 			() => current.current === sessionId,
 			(receipt) => {
+				if (current.current !== sessionId) return;
 				setMessage(`${receipt.path}: ${receipt.status}`);
+				runRefresh();
+			},
+			() => {
+				if (current.current !== sessionId) return;
+				setMessage(
+					"Write outcome unconfirmed. Check the recorded receipt before retrying.",
+				);
 				runRefresh();
 			},
 		).open();
@@ -1109,8 +1142,10 @@ export function ContextTray({
 										className="xo-note-chip"
 									>
 										<span>
-											{receipt.path} · {receipt.status}
+											{describeNoteTarget(proposal)} ·{" "}
+											{receipt.status}
 										</span>
+										<ReceiptDetails proposal={proposal} />
 										{[
 											"pending",
 											"unknown",
