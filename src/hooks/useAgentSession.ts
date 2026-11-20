@@ -232,16 +232,19 @@ export function useAgentSession(
 
 				const capabilities =
 					agentClient.getSessionRestoreCapabilities();
-				const sessionResult = !restoreId
-					? await agentClient.newSession(effectiveCwd)
-					: capabilities.load
+				const restored = restoreId
+					? capabilities.load
 						? await agentClient.loadSession(restoreId, effectiveCwd)
 						: capabilities.resume
 							? await agentClient.resumeSession(
 									restoreId,
 									effectiveCwd,
 								)
-							: null;
+							: null
+					: null;
+				const sessionResult = restoreId
+					? restored
+					: await agentClient.newSession(effectiveCwd);
 				if (
 					!sessionResult ||
 					(restoreId && sessionResult.sessionId !== restoreId)
@@ -314,6 +317,7 @@ export function useAgentSession(
 						: prev.agentInfo,
 					lastActivityAt: new Date(),
 				}));
+				restored?.publishUpdates?.();
 			} catch (error) {
 				if (generation !== createGenerationRef.current) {
 					return;

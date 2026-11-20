@@ -18,6 +18,10 @@ import type { Logger } from "../utils/logger";
  */
 export class AcpHandler {
 	private sessionUpdateListeners = new Set<(update: SessionUpdate) => void>();
+	private restoreCapture: {
+		sessionId: string;
+		updates: SessionUpdate[];
+	} | null = null;
 
 	/** Tracks session updates during a prompt. */
 	private promptSessionUpdateCount = 0;
@@ -49,8 +53,25 @@ export class AcpHandler {
 		return () => this.sessionUpdateListeners.delete(callback);
 	}
 
+	/** Collect provisional replay without delivering it to the current view. */
+	captureRestore(sessionId: string) {
+		const capture = { sessionId, updates: [] as SessionUpdate[] };
+		this.restoreCapture = capture;
+		return {
+			updates: capture.updates,
+			stop: () => {
+				if (this.restoreCapture === capture) this.restoreCapture = null;
+			},
+		};
+	}
+
 	/** Emit a session update to all listeners. Filters by current sessionId. */
 	emitSessionUpdate(update: SessionUpdate): void {
+		if (this.restoreCapture && update.type !== "process_error") {
+			if (update.sessionId === this.restoreCapture.sessionId)
+				this.restoreCapture.updates.push(update);
+			return;
+		}
 		const currentId = this.getCurrentSessionId();
 		if (currentId && update.sessionId !== currentId) {
 			return;
@@ -76,7 +97,6 @@ export class AcpHandler {
 		switch (update.sessionUpdate) {
 			case "agent_message_chunk":
 			case "agent_thought_chunk":
-			case "user_message_chunk":
 				if (update.content.type === "text") {
 					this.emitSessionUpdate({
 						type: update.sessionUpdate,
@@ -84,6 +104,14 @@ export class AcpHandler {
 						text: update.content.text,
 					});
 				}
+				break;
+			case "user_message_chunk":
+				// ACP replays wire prompts, not the local display transcript.
+				// Keep the turn boundary, not the untrusted payload.
+				this.emitSessionUpdate({
+					type: "user_message_chunk",
+					sessionId,
+				});
 				break;
 
 			case "tool_call":
@@ -184,6 +212,9 @@ export class AcpHandler {
 	requestPermission(
 		params: acp.RequestPermissionRequest,
 	): Promise<acp.RequestPermissionResponse> {
+		// Replay is not a user-authorized prompt or permission surface.
+		if (this.restoreCapture)
+			return Promise.resolve({ outcome: { outcome: "cancelled" } });
 		return this.permissionManager.request(params);
 	}
 

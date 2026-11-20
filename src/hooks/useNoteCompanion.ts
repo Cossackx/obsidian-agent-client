@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { CompanionState } from "../types/note-companion";
+import type { CompanionState, ContextItem } from "../types/note-companion";
 import type { PreparedContext } from "../services/context-builder";
 import {
 	consumeSubmittedItems,
@@ -54,8 +54,54 @@ export function useNoteCompanion(
 			)
 				return;
 			revisions.current.set(key, revision);
+			// Tray adds are insertion intents, including multi-item batches.
+			const isAdd = kind.startsWith("add:");
+			let attempted: ContextItem[] = [];
+			let retryChange = change;
+			let readbackUnavailable = false;
 			try {
-				const result = await storage.update(id, change);
+				const result = isAdd
+					? await storage.update(
+							id,
+							(old) => {
+								const present = new Set(
+									old.items.map((item) => item.id),
+								);
+								attempted = change(old).items.filter(
+									(item) =>
+										!present.has(item.id) &&
+										!revisions.current.has(
+											JSON.stringify([
+												id,
+												`remove:${item.id}`,
+											]),
+										),
+								);
+								return attempted.length
+									? {
+											...old,
+											items: [...old.items, ...attempted],
+										}
+									: old;
+							},
+							(readback) => {
+								readbackUnavailable = readback === undefined;
+								const present = new Set(
+									readback?.items.map((item) => item.id),
+								);
+								// An observed row is applied even if it later disappears.
+								const remaining = readbackUnavailable
+									? []
+									: attempted.filter(
+											(item) => !present.has(item.id),
+										);
+								retryChange = (old) => ({
+									...old,
+									items: [...old.items, ...remaining],
+								});
+							},
+						)
+					: await storage.update(id, change);
 				if (revisions.current.get(key) === revision)
 					failed.current.delete(key);
 				if (active.current === id) {
@@ -70,12 +116,19 @@ export function useNoteCompanion(
 			} catch (error) {
 				if (active.current === id)
 					setWarning(
-						error instanceof Error
-							? error.message
-							: "Companion state could not be saved",
+						readbackUnavailable
+							? "Could not verify added context. Refresh and re-add only missing items."
+							: error instanceof Error
+								? error.message
+								: "Companion state could not be saved",
 					);
 				if (revisions.current.get(key) === revision)
-					failed.current.set(key, { id, kind, revision, change });
+					failed.current.set(key, {
+						id,
+						kind,
+						revision,
+						change: retryChange,
+					});
 			}
 		},
 		[storage],

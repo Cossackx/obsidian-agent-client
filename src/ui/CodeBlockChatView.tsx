@@ -157,15 +157,17 @@ export class EmbeddedChatViewContainer implements IChatViewContainer {
 	}
 
 	unmount(): void {
-		this.plugin.viewRegistry.unregister(this.viewId);
-		if (this.root) {
-			this.root.unmount();
-			this.root = null;
+		if (!this.root) return;
+		const root = this.root;
+		this.root = null;
+		try {
+			root.unmount();
+		} finally {
+			// Release before making the stable key available to a remount.
+			// The grace window still lets a sequential rendering reuse the client.
+			this.plugin.releaseAcpClient(this.viewId);
+			this.plugin.viewRegistry.unregister(this.viewId);
 		}
-		// Schedule a graceful teardown of the AcpClient; a remount within the
-		// grace window cancels it (re-processing churn), so only genuine removal
-		// disconnects the agent process.
-		this.plugin.releaseAcpClient(this.viewId);
 	}
 
 	// ============================================================
@@ -221,7 +223,9 @@ export class EmbeddedChatViewContainer implements IChatViewContainer {
 	 * then scroll and focus. Sections far from the scroll position may stay
 	 * pruned; give up silently after one second so a miss costs nothing.
 	 */
-	private scrollAndFocusInputWhenConnected(deadline = Date.now() + 1000): void {
+	private scrollAndFocusInputWhenConnected(
+		deadline = Date.now() + 1000,
+	): void {
 		if (this.containerEl.isConnected) {
 			this.scrollAndFocusInput();
 			return;
@@ -318,7 +322,13 @@ export function mountCodeBlockChat(
 	mountCtx: CodeBlockMountContext,
 ): EmbeddedChatViewContainer {
 	const container = el.createDiv({ cls: "agent-client-code-block-host" });
-	const viewId = `code-block:${mountCtx.blockId}`;
+	// Use the stable key for ordinary remount churn, but concurrent renderings
+	// must never share a registry entry or a client lease. History still uses
+	// config.id regardless of the physical owner's key.
+	const stableKey = `code-block:${mountCtx.blockId}`;
+	const viewId = plugin.viewRegistry.get(stableKey)
+		? `code-block-mount:${crypto.randomUUID()}`
+		: stableKey;
 	const viewContainer = new EmbeddedChatViewContainer(
 		plugin,
 		viewId,

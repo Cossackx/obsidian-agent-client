@@ -101,7 +101,7 @@ export interface UseSessionHistoryOptions {
 		sessionId: string,
 		operation: (stillMounted: () => boolean) => Promise<T>,
 	) => Promise<T>;
-	/** Clear messages before restoring from local storage */
+	/** Clear the previous transcript only when a restore has succeeded. */
 	onClearMessages?: () => void;
 }
 
@@ -556,71 +556,31 @@ export function useSessionHistory(
 					const live = agentClient.getSessionRestoreCapabilities();
 					if (!live.load && !live.resume)
 						throw new Error("Session restoration is not supported");
+					const localMessages =
+						await settingsAccess.loadSessionMessages(sessionId);
+					if (!stillMounted()) return;
+					const result = live.load
+						? await agentClient.loadSession(sessionId, cwd)
+						: await agentClient.resumeSession(sessionId, cwd);
+					if (!stillMounted()) return;
+					if (result.sessionId !== sessionId)
+						throw new Error(
+							"The agent could not restore the exact conversation",
+						);
 					onClearMessages?.();
-					// IMPORTANT: Update session.sessionId BEFORE calling restore
-					// so that session/update notifications are not ignored
-					onSessionLoad(sessionId, undefined, undefined);
-
-					if (live.load) {
-						// Check local messages first to decide whether to use them or agent replay
-						const localMessages =
-							await settingsAccess.loadSessionMessages(sessionId);
-						if (!stillMounted()) return;
-
-						if (localMessages && onMessagesRestore) {
-							// Local messages available: ignore agent replay, restore from local
-							onIgnoreUpdates?.(true);
-							try {
-								const result = await agentClient.loadSession(
-									sessionId,
-									cwd,
-								);
-								if (!stillMounted()) return;
-								onSessionLoad(
-									result.sessionId,
-									result.modes,
-									result.configOptions,
-								);
-								onMessagesRestore(localMessages);
-							} finally {
-								onIgnoreUpdates?.(false);
-							}
-						} else {
-							// No local messages: let agent replay flow through to UI
-							const result = await agentClient.loadSession(
-								sessionId,
-								cwd,
-							);
-							if (!stillMounted()) return;
-							onSessionLoad(
-								result.sessionId,
-								result.modes,
-								result.configOptions,
-							);
-						}
-					} else {
-						// Use resume (without history replay, restore from local storage)
-						const result = await agentClient.resumeSession(
-							sessionId,
-							cwd,
-						);
-						if (!stillMounted()) return;
-						onSessionLoad(
-							result.sessionId,
-							result.modes,
-							result.configOptions,
-						);
-
-						// Resume doesn't return history, so restore from local storage
-						const localMessages =
-							await settingsAccess.loadSessionMessages(sessionId);
-						if (
-							stillMounted() &&
-							localMessages &&
-							onMessagesRestore
-						) {
-							onMessagesRestore(localMessages);
-						}
+					onSessionLoad(
+						result.sessionId,
+						result.modes,
+						result.configOptions,
+					);
+					const useLocal =
+						localMessages !== null && onMessagesRestore;
+					if (useLocal) onIgnoreUpdates?.(true);
+					try {
+						if (useLocal) useLocal(localMessages);
+						result.publishUpdates?.();
+					} finally {
+						if (useLocal) onIgnoreUpdates?.(false);
 					}
 				} catch (err) {
 					const errorMessage = extractErrorMessage(err);

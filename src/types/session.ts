@@ -282,12 +282,10 @@ export interface AgentThoughtChunk extends SessionUpdateBase {
 }
 
 /**
- * Text chunk from user's message during session/load.
- * Used for reconstructing user messages when loading a saved session.
+ * A user-turn boundary from ACP; never carries prompt text into display history.
  */
 export interface UserMessageChunk extends SessionUpdateBase {
 	type: "user_message_chunk";
-	text: string;
 }
 
 /**

@@ -252,6 +252,7 @@ export function useAgentMessages(
 	}, []);
 
 	const clearMessages = useCallback((): void => {
+		pendingUpdatesRef.current = [];
 		setMessages([]);
 		toolCallIndexRef.current.clear();
 		setIsSending(false);

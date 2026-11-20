@@ -308,17 +308,30 @@ export class CompanionStorage {
 	update(
 		sessionId: string,
 		change: (state: CompanionState) => CompanionState,
+		onUnconfirmed?: (readback: CompanionState | null | undefined) => void,
 	): Promise<CompanionState> {
 		return this.enqueue(async () => {
 			if (this.deleted.has(sessionId))
 				throw new Error("The conversation was deleted");
-			const state = change(
-				(await this.read(sessionId)) ?? emptyCompanion(sessionId),
-			);
+			const previous =
+				(await this.read(sessionId)) ?? emptyCompanion(sessionId);
+			const state = change(previous);
 			assertState(state, sessionId);
-			if (!(await this.adapter.exists(this.directory)))
-				await this.adapter.mkdir(this.directory);
-			await this.persist(sessionId, state);
+			try {
+				if (!onUnconfirmed || state !== previous) {
+					if (!(await this.adapter.exists(this.directory)))
+						await this.adapter.mkdir(this.directory);
+					await this.persist(sessionId, state);
+				}
+			} catch (error) {
+				// Read the durable slot before a queued edit or removal can run.
+				// Undefined means readback itself was unavailable.
+				if (onUnconfirmed)
+					onUnconfirmed(
+						await this.read(sessionId).catch(() => undefined),
+					);
+				throw error;
+			}
 			for (const listener of this.listeners) listener(state);
 			return state;
 		});

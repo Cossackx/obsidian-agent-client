@@ -71,6 +71,11 @@ export interface TerminalOutputResult {
 	} | null;
 }
 
+interface RestoredSession extends SessionResult {
+	/** Deliver accepted updates once, after the caller commits its display state. */
+	publishUpdates: () => void;
+}
+
 /**
  * ACP client for agent communication and process lifecycle management.
  */
@@ -86,6 +91,7 @@ export class AcpClient {
 	private confirmedSessionId: string | null = null;
 	private capabilities: InitializeResult["agentCapabilities"];
 	private currentSessionId: string | null = null;
+	private restoring = false;
 
 	// Callbacks (none — all events flow through onSessionUpdate via AcpHandler)
 
@@ -749,6 +755,7 @@ export class AcpClient {
 		this.currentAgentId = null;
 		this.currentSessionId = null;
 		this.confirmedSessionId = null;
+		this.restoring = false;
 		this.capabilities = undefined;
 		this.stopping = Promise.resolve()
 			.then(async () => {
@@ -790,6 +797,7 @@ export class AcpClient {
 	hasLiveSession(sessionId: string): boolean {
 		return (
 			this.isInitialized() &&
+			!this.restoring &&
 			this.currentSessionId === sessionId &&
 			this.confirmedSessionId === sessionId
 		);
@@ -1004,42 +1012,14 @@ export class AcpClient {
 	/**
 	 * Load a previous session with history replay (stable).
 	 *
-	 * Conversation history is received via onSessionUpdate callback
-	 * as user_message_chunk, agent_message_chunk, tool_call, etc.
+	 * Conversation history is buffered until the successful caller publishes it.
 	 *
 	 * @param sessionId - Session to load
 	 * @param cwd - Working directory
 	 * @returns Promise resolving to session result with modes and models
 	 */
-	async loadSession(sessionId: string, cwd: string): Promise<SessionResult> {
-		const connection = this.requireConnection();
-
-		// Set sessionId before await so replay updates pass the sessionId filter
-		this.confirmedSessionId = null;
-		this.currentSessionId = sessionId;
-
-		try {
-			this.logger.log(`[AcpClient] Loading session: ${sessionId}...`);
-
-			const response = await connection.agent.request("session/load", {
-				sessionId,
-				cwd: this.toSessionCwd(cwd),
-				mcpServers: [],
-			});
-
-			this.logger.log(`[AcpClient] Session loaded: ${sessionId}`);
-			const result = AcpTypeConverter.toSessionResult(
-				sessionId,
-				response,
-			);
-			if (this.connection !== connection || connection.signal.aborted)
-				throw new Error("Connection changed while opening a session");
-			this.currentSessionId = this.confirmedSessionId = result.sessionId;
-			return result;
-		} catch (error) {
-			this.logger.error("[AcpClient] Load Session Error:", error);
-			throw error;
-		}
+	loadSession(sessionId: string, cwd: string): Promise<RestoredSession> {
+		return this.restoreSession("session/load", sessionId, cwd);
 	}
 
 	/**
@@ -1051,26 +1031,29 @@ export class AcpClient {
 	 * @param cwd - Working directory
 	 * @returns Promise resolving to session result with modes and models
 	 */
-	async resumeSession(
+	resumeSession(sessionId: string, cwd: string): Promise<RestoredSession> {
+		return this.restoreSession("session/resume", sessionId, cwd);
+	}
+
+	private async restoreSession(
+		method: "session/load" | "session/resume",
 		sessionId: string,
 		cwd: string,
-	): Promise<SessionResult> {
+	): Promise<RestoredSession> {
 		const connection = this.requireConnection();
-
-		// Set sessionId before await so any updates pass the sessionId filter
-		this.confirmedSessionId = null;
-		this.currentSessionId = sessionId;
+		if (this.restoring)
+			throw new Error("A session restore is already running");
+		this.restoring = true;
+		const capture = this.handler.captureRestore(sessionId);
 
 		try {
-			this.logger.log(`[AcpClient] Resuming session: ${sessionId}...`);
-
-			const response = await connection.agent.request("session/resume", {
+			this.logger.log(`[AcpClient] ${method}: ${sessionId}...`);
+			const response = await connection.agent.request(method, {
 				sessionId,
 				cwd: this.toSessionCwd(cwd),
 				mcpServers: [],
 			});
 
-			this.logger.log(`[AcpClient] Session resumed: ${sessionId}`);
 			const result = AcpTypeConverter.toSessionResult(
 				sessionId,
 				response,
@@ -1078,10 +1061,25 @@ export class AcpClient {
 			if (this.connection !== connection || connection.signal.aborted)
 				throw new Error("Connection changed while opening a session");
 			this.currentSessionId = this.confirmedSessionId = result.sessionId;
-			return result;
+			return {
+				...result,
+				publishUpdates: () => {
+					const updates = capture.updates.splice(0);
+					if (
+						this.connection !== connection ||
+						!this.hasLiveSession(sessionId)
+					)
+						return;
+					for (const update of updates)
+						this.handler.emitSessionUpdate(update);
+				},
+			};
 		} catch (error) {
-			this.logger.error("[AcpClient] Resume Session Error:", error);
+			this.logger.error(`[AcpClient] ${method} failed:`, error);
 			throw error;
+		} finally {
+			capture.stop();
+			if (this.connection === connection) this.restoring = false;
 		}
 	}
 

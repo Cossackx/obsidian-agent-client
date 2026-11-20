@@ -301,10 +301,14 @@ export function applySingleUpdate(
 				text: update.text,
 			});
 		case "user_message_chunk":
-			return applyUpdateUserMessage(prev, {
-				type: "text",
-				text: update.text,
-			});
+			// Local transcripts carry the trusted display text. Without one,
+			// preserve the ordinary reply history without importing wire prompts.
+			return prev.at(-1)?.role === "user"
+				? prev
+				: applyUpdateUserMessage(prev, {
+						type: "text",
+						text: "[User prompt unavailable in local history]",
+					});
 		case "tool_call":
 			return applyUpsertToolCall(
 				prev,

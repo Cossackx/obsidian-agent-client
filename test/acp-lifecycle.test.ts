@@ -3,7 +3,11 @@ import { PassThrough } from "node:stream";
 import { beforeEach, expect, it, vi } from "vitest";
 import { AcpClient } from "../src/acp/acp-client";
 
-const mocks = vi.hoisted(() => ({ spawn: vi.fn(), connect: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+	spawn: vi.fn(),
+	connect: vi.fn(),
+	notification: vi.fn(),
+}));
 vi.mock("node:child_process", async (original) => ({
 	...(await original<object>()),
 	spawn: mocks.spawn,
@@ -13,7 +17,10 @@ vi.mock("@agentclientprotocol/sdk", async (original) => ({
 	client: () => {
 		const app = {
 			onRequest: () => app,
-			onNotification: () => app,
+			onNotification: (method: string, handler: unknown) => {
+				mocks.notification(method, handler);
+				return app;
+			},
 			connect: mocks.connect,
 		};
 		return app;
@@ -69,6 +76,7 @@ function connection(error?: Error) {
 beforeEach(() => {
 	mocks.spawn.mockReset();
 	mocks.connect.mockReset();
+	mocks.notification.mockReset();
 });
 
 it("failed_initialize_releases_only_owned_resources and ignores late old-process events", async () => {
@@ -120,6 +128,66 @@ it.each([false, true])(
 		expect(child.kill).toHaveBeenCalledTimes(1);
 		expect(child.exitCode).toBe(0);
 		expect(client.isInitialized()).toBe(false);
+	},
+);
+
+it.each(["load", "resume"] as const)(
+	"keeps %s replay provisional, discards rejected updates and publishes a successful restore once",
+	async (method) => {
+		fakeChild();
+		const { request } = connection();
+		const client = makeClient();
+		const received = vi.fn();
+		client.onSessionUpdate(received);
+		try {
+			await client.initialize(config);
+			request.mockResolvedValueOnce({ sessionId: "previous" } as never);
+			await client.newSession(config.workingDirectory);
+			const update = mocks.notification.mock.calls.find(
+				([name]) => name === "session/update",
+			)?.[1] as (notification: unknown) => Promise<void>;
+			const replay = (sessionId: string) =>
+				update({
+					params: {
+						sessionId,
+						update: {
+							sessionUpdate: "agent_message_chunk",
+							content: {
+								type: "text",
+								text: `Reply for ${sessionId}`,
+							},
+						},
+					},
+				});
+			const restore = (id: string) =>
+				method === "load"
+					? client.loadSession(id, config.workingDirectory)
+					: client.resumeSession(id, config.workingDirectory);
+			request.mockImplementationOnce(async () => {
+				await replay("refused");
+				throw new Error("Unknown session");
+			});
+			await expect(restore("refused")).rejects.toThrow("Unknown session");
+			await replay("refused");
+			expect(received).not.toHaveBeenCalled();
+			expect(client.getConfirmedSessionId()).toBe("previous");
+			request.mockImplementationOnce(async () => {
+				await replay("accepted");
+				return { protocolVersion: 1, agentCapabilities: {} };
+			});
+			const restored = await restore("accepted");
+			expect(received).not.toHaveBeenCalled();
+			expect(client.getConfirmedSessionId()).toBe("accepted");
+			restored.publishUpdates();
+			restored.publishUpdates();
+			expect(received).toHaveBeenCalledExactlyOnceWith({
+				text: "Reply for accepted",
+				type: "agent_message_chunk",
+				sessionId: "accepted",
+			});
+		} finally {
+			await client.disconnect();
+		}
 	},
 );
 

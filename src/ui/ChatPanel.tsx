@@ -674,7 +674,14 @@ export const ChatPanel = React.memo(function ChatPanel({
 						const text = await vaultService.readNote(
 							item.source.path,
 						);
-						return text === item.source.text
+						// Staged passages come from an editor buffer. Compare only
+						// freshness here; the captured bytes/range still go to preview.
+						const unchanged =
+							text === item.source.text ||
+							(item.scope.kind === "passage" &&
+								text.replace(/\r\n/g, "\n") ===
+									item.source.text.replace(/\r\n/g, "\n"));
+						return unchanged
 							? item
 							: { ...item, status: "changed" as const };
 					} catch {
