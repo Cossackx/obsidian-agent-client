@@ -39,7 +39,7 @@ import {
 } from "../utils/wikilink-resolver";
 import { formatLinkedNotesBlock } from "../utils/wikilink-formatter";
 import { extractSelection, truncateText } from "../utils/selection";
-import type { PreparedContext } from "./context-builder";
+import { isNotePath, type PreparedContext } from "./context-builder";
 
 // ============================================================================
 // Types
@@ -50,6 +50,8 @@ import type { PreparedContext } from "./context-builder";
  */
 export interface PreparePromptInput {
 	preparedContext?: PreparedContext;
+	/** Generated instructions are not composer input and must not discover more sources. */
+	generatedInstruction?: string;
 	/** User's message text (may contain @mentions) */
 	message: string;
 
@@ -106,6 +108,7 @@ export interface PreparePromptResult {
 
 	/** Content to send to agent (processed text + images) */
 	agentContent: PromptContent[];
+	sources: PreparedContext["sources"];
 
 	/** Auto-mention context metadata (if auto-mention is active) */
 	autoMentionContext?: {
@@ -208,9 +211,7 @@ async function processNote(
 		);
 
 		const wasTruncated = content.length > maxNoteLength;
-		const processedContent = wasTruncated
-			? content.substring(0, maxNoteLength)
-			: content;
+		const processedContent = truncateText(content, maxNoteLength);
 
 		return {
 			content: processedContent,
@@ -272,6 +273,24 @@ async function readSelection(
  * https://agentclientprotocol.com/protocol/slash-commands which allows
  * resource blocks alongside slash-command text blocks.
  */
+function recordSelection(
+	sources: PreparedContext["sources"],
+	path: string,
+	selection: NonNullable<NoteMetadata["selection"]>,
+	sent: { text: string; originalLength: number },
+) {
+	const range = selection.range ?? { start: 0, end: sent.originalLength };
+	if (isNotePath(path))
+		sources.push({
+			path,
+			text: sent.text,
+			originalLength: sent.originalLength,
+			capturedAt: Date.now(),
+			scope: { kind: "passage", range },
+			positions: { from: selection.from, to: selection.to },
+		});
+}
+
 function buildAutoMentionPrefix(
 	activeNote: NoteMetadata | null | undefined,
 	isDisabled: boolean | undefined,
@@ -450,20 +469,32 @@ export async function preparePrompt(
 	mentionService: IMentionService,
 ): Promise<PreparePromptResult> {
 	const excluded = new Set(input.preparedContext?.excludedPaths);
-	const mentionedNotes = extractMentionedNotes(
-		input.message,
-		mentionService,
-	).filter(({ file }) => !file || !excluded.has(file.path));
+	const mentionedNotes =
+		input.generatedInstruction !== undefined
+			? []
+			: extractMentionedNotes(input.message, mentionService).filter(
+					({ file }) => !file || !excluded.has(file.path),
+				);
 	// Keep the user's words, but do not implicitly re-attach a captured or destination-only note.
 	const base =
-		input.activeNote && excluded.has(input.activeNote.path)
-			? { ...input, activeNote: null }
-			: input;
+		input.generatedInstruction !== undefined
+			? {
+					...input,
+					message: input.generatedInstruction,
+					activeNote: null,
+				}
+			: input.activeNote && excluded.has(input.activeNote.path)
+				? { ...input, activeNote: null }
+				: input;
 	const prepared = await (base.supportsEmbeddedContext
 		? preparePromptWithEmbeddedContext(base, vaultAccess, mentionedNotes)
 		: preparePromptWithTextContext(base, vaultAccess, mentionedNotes));
-	if (input.preparedContext)
+	if (input.preparedContext) {
 		prepared.agentContent.push(...input.preparedContext.blocks);
+		prepared.sources.push(...input.preparedContext.sources);
+	}
+	if (input.generatedInstruction !== undefined)
+		prepared.displayContent = [{ type: "text", text: input.message }];
 	return prepared;
 }
 
@@ -479,6 +510,7 @@ async function preparePromptWithEmbeddedContext(
 	}>,
 ): Promise<PreparePromptResult> {
 	const maxNoteLen = input.maxNoteLength ?? DEFAULT_MAX_NOTE_LENGTH;
+	const sources: PreparedContext["sources"] = [];
 	const wikilinkCtx = buildWikilinkContext(input);
 	const resourceBlocks: ResourcePromptContent[] = [];
 	// Wikilink metadata for the mentioned notes, emitted as sibling text
@@ -498,6 +530,14 @@ async function preparePromptWithEmbeddedContext(
 			maxNoteLen,
 		);
 		if (!note) continue;
+		if (isNotePath(file.path))
+			sources.push({
+				path: file.path,
+				text: note.content,
+				capturedAt: Date.now(),
+				scope: { kind: "note" },
+				originalLength: note.originalLength,
+			});
 
 		const text = note.wasTruncated
 			? note.content +
@@ -515,12 +555,14 @@ async function preparePromptWithEmbeddedContext(
 		});
 
 		// ref = the resource uri so the agent can correlate the two blocks.
-		const linksBlock = buildLinkedNotesBlock(
-			file.path,
-			undefined,
-			note.uri,
-			wikilinkCtx,
-		);
+		const linksBlock = note.wasTruncated
+			? null
+			: buildLinkedNotesBlock(
+					file.path,
+					undefined,
+					note.uri,
+					wikilinkCtx,
+				);
 		if (linksBlock) {
 			mentionedLinkBlocks.push({ type: "text", text: linksBlock });
 		}
@@ -540,7 +582,7 @@ async function preparePromptWithEmbeddedContext(
 			vaultAccess,
 			input.convertToWsl ?? false,
 			input.maxSelectionLength ?? DEFAULT_MAX_SELECTION_LENGTH,
-			wikilinkCtx,
+			sources,
 		);
 		autoMentionBlocks.push(...autoMentionResource);
 	}
@@ -573,6 +615,7 @@ async function preparePromptWithEmbeddedContext(
 	return {
 		displayContent: buildDisplayContent(input),
 		agentContent,
+		sources,
 		autoMentionContext: buildAutoMentionContext(
 			input.activeNote,
 			input.isAutoMentionDisabled,
@@ -592,6 +635,7 @@ async function preparePromptWithTextContext(
 	}>,
 ): Promise<PreparePromptResult> {
 	const maxNoteLen = input.maxNoteLength ?? DEFAULT_MAX_NOTE_LENGTH;
+	const sources: PreparedContext["sources"] = [];
 	const wikilinkCtx = buildWikilinkContext(input);
 	const contextBlocks: string[] = [];
 
@@ -607,6 +651,14 @@ async function preparePromptWithTextContext(
 			maxNoteLen,
 		);
 		if (!note) continue;
+		if (isNotePath(file.path))
+			sources.push({
+				path: file.path,
+				text: note.content,
+				capturedAt: Date.now(),
+				scope: { kind: "note" },
+				originalLength: note.originalLength,
+			});
 
 		const truncationNote = note.wasTruncated
 			? `\n\n[Note: This note was truncated. Original length: ${note.originalLength} characters, showing first ${maxNoteLen} characters]`
@@ -619,12 +671,14 @@ async function preparePromptWithTextContext(
 		// Sibling of the note block (ref = the same absolute path). Pushed as a
 		// separate contextBlock, so it is also dropped on slash-command turns
 		// by buildAgentMessageText's includeContext gate.
-		const linksBlock = buildLinkedNotesBlock(
-			file.path,
-			undefined,
-			note.absolutePath,
-			wikilinkCtx,
-		);
+		const linksBlock = note.wasTruncated
+			? null
+			: buildLinkedNotesBlock(
+					file.path,
+					undefined,
+					note.absolutePath,
+					wikilinkCtx,
+				);
 		if (linksBlock) {
 			contextBlocks.push(linksBlock);
 		}
@@ -639,7 +693,7 @@ async function preparePromptWithTextContext(
 			input.convertToWsl ?? false,
 			input.activeNote.selection,
 			input.maxSelectionLength ?? DEFAULT_MAX_SELECTION_LENGTH,
-			wikilinkCtx,
+			sources,
 		);
 		contextBlocks.push(...autoMentionContextBlocks);
 	}
@@ -675,6 +729,7 @@ async function preparePromptWithTextContext(
 	return {
 		displayContent: buildDisplayContent(input),
 		agentContent,
+		sources: input.message.startsWith("/") ? [] : sources,
 		// Skip the badge on slash-command turns because the text-context
 		// block was also dropped (see buildAgentMessageText). Keeping the
 		// badge state consistent with what was actually sent to the agent
@@ -698,7 +753,7 @@ async function buildAutoMentionResource(
 	vaultAccess: IVaultAccess,
 	convertToWsl: boolean,
 	maxSelectionLength: number,
-	wikilinkCtx: WikilinkScanContext | null,
+	sources: PreparedContext["sources"],
 ): Promise<PromptContent[]> {
 	const absolutePath = resolveAbsolutePath(
 		activeNote.path,
@@ -726,6 +781,7 @@ async function buildAutoMentionResource(
 			];
 		}
 
+		recordSelection(sources, activeNote.path, activeNote.selection, sel);
 		const text = sel.wasTruncated
 			? sel.text +
 				`\n\n[Note: Truncated from ${sel.originalLength} to ${sel.text.length} UTF-16 units]`
@@ -747,19 +803,8 @@ async function buildAutoMentionResource(
 			},
 		];
 
-		// ref = the resource uri, matching the resource block above.
-		const linksBlock = buildLinkedNotesBlock(
-			activeNote.path,
-			{
-				fromLine: activeNote.selection.from.line,
-				toLine: activeNote.selection.to.line,
-			},
-			uri,
-			wikilinkCtx,
-		);
-		if (linksBlock) {
-			blocks.push({ type: "text", text: linksBlock });
-		}
+		// The cache exposes no revision binding to a captured editor buffer.
+		// Do not infer metadata outside the exact bytes approved for this selection.
 
 		return blocks;
 	}
@@ -782,7 +827,7 @@ async function buildAutoMentionTextContext(
 	convertToWsl: boolean,
 	selection: NoteMetadata["selection"],
 	maxSelectionLength: number,
-	wikilinkCtx: WikilinkScanContext | null,
+	sources: PreparedContext["sources"],
 ): Promise<string[]> {
 	const absolutePath = resolveAbsolutePath(notePath, vaultPath, convertToWsl);
 
@@ -802,6 +847,7 @@ async function buildAutoMentionTextContext(
 			];
 		}
 
+		recordSelection(sources, notePath, selection, sel);
 		const truncationNote = sel.wasTruncated
 			? `\n\n[Note: The selection was truncated. Original length: ${sel.originalLength} UTF-16 units, showing first ${sel.text.length}]`
 			: "";
@@ -814,14 +860,7 @@ ${sel.text}${truncationNote}
 This is what the user is currently focusing on.
 </obsidian_opened_note>`;
 
-		// Sibling of the opened-note block (ref = the same absolute path).
-		const linksBlock = buildLinkedNotesBlock(
-			notePath,
-			{ fromLine: selection.from.line, toLine: selection.to.line },
-			absolutePath,
-			wikilinkCtx,
-		);
-		return linksBlock ? [openedNote, linksBlock] : [openedNote];
+		return [openedNote];
 	}
 
 	return [

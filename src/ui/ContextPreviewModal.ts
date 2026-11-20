@@ -16,6 +16,19 @@ export function confirmPayload(
 				this.contentEl.createEl("p", {
 					text: "These blocks will be sent to the configured agent. Context is not an access restriction.",
 				});
+				const characters = blocks.reduce(
+					(count, block) =>
+						count +
+						(block.type === "text"
+							? block.text.length
+							: block.type === "resource"
+								? block.resource.text.length
+								: 0),
+					0,
+				);
+				this.contentEl.createEl("p", {
+					text: `${blocks.length} blocks · ${characters} text UTF-16 units (attachments counted separately)`,
+				});
 				for (const notice of notices)
 					this.contentEl.createEl("p", {
 						text: notice,
@@ -39,6 +52,17 @@ export function confirmPayload(
 					});
 					details.createEl("summary", { text: heading });
 					details.createEl("pre", { text: body });
+					if (
+						block.type === "image" &&
+						/^image\/(?:png|jpe?g|gif|webp)$/i.test(block.mimeType)
+					)
+						details.createEl("img", {
+							cls: "xo-note-preview-image",
+							attr: {
+								src: `data:${block.mimeType};base64,${block.data}`,
+								alt: "Exact outbound image",
+							},
+						});
 				}
 				const actions = this.contentEl.createDiv("xo-note-row");
 				const cancel = actions.createEl("button", { text: "Cancel" });

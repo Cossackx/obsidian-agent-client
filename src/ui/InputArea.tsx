@@ -345,11 +345,6 @@ export function InputArea({
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
 	const dragCounterRef = useRef(0);
 
-	// Clear attached files when agent changes
-	useEffect(() => {
-		onAttachedFilesChange([]);
-	}, [agentId, onAttachedFilesChange]);
-
 	/**
 	 * Add multiple attachments at once with limit enforcement.
 	 * Single state update avoids stale closure issues.
@@ -883,8 +878,6 @@ export function InputArea({
 
 		// Cancellation or uncertain completion leaves the draft available.
 		if ((await onSendMessage(messageToSend, filesToSend)) === false) return;
-		onInputChange("");
-		onAttachedFilesChange([]);
 		setHintText(null);
 		setCommandText("");
 		resetHistory();

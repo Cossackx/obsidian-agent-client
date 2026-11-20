@@ -1,3 +1,4 @@
+import { createHash } from "crypto";
 /**
  * Session storage for persisting session metadata and message history.
  *
@@ -249,11 +250,11 @@ export class SessionStorage {
 			const sessions = (state.savedSessions || []).filter(
 				(s) => s.sessionId !== sessionId,
 			);
+			await this.plugin.companionStorage?.remove(sessionId);
 			await this.settingsAccess.updateSettings({
 				savedSessions: sessions,
 			});
-			await this.deleteSessionMessages(sessionId);
-			await this.plugin.companionStorage?.remove(sessionId);
+			await this.removeOwnedTranscripts(sessionId);
 		});
 	}
 
@@ -350,8 +351,41 @@ export class SessionStorage {
 	}
 
 	private getSessionFilePath(sessionId: string): string {
-		const safeId = sessionId.replace(/[^a-zA-Z0-9_-]/g, "_");
-		return `${this.getSessionsDir()}/${safeId}.json`;
+		// A dot disjoins this namespace from every legacy sanitized basename.
+		// Hash UTF-16 code units so even non-scalar opaque IDs remain distinct.
+		const key = createHash("sha256")
+			.update(sessionId, "utf16le")
+			.digest("hex");
+		return `${this.getSessionsDir()}/transcript.${key}.json`;
+	}
+	private getLegacySessionFilePath(sessionId: string): string {
+		return `${this.getSessionsDir()}/${sessionId.replace(/[^a-zA-Z0-9_-]/g, "_")}.json`;
+	}
+	private async readTranscript(
+		sessionId: string,
+	): Promise<{ path: string; data: SessionMessagesFile } | null> {
+		const adapter = this.plugin.app.vault.adapter;
+		const primary = this.getSessionFilePath(sessionId);
+		for (const path of [
+			primary,
+			this.getLegacySessionFilePath(sessionId),
+		]) {
+			if (!(await adapter.exists(path))) continue;
+			const data = JSON.parse(
+				await adapter.read(path),
+			) as SessionMessagesFile | null;
+			if (
+				data?.sessionId === sessionId &&
+				data.version === 1 &&
+				Array.isArray(data.messages)
+			)
+				return { path, data };
+			if (path === primary)
+				throw new Error(
+					"Transcript identity or schema could not be verified",
+				);
+		}
+		return null;
 	}
 
 	/**
@@ -408,6 +442,8 @@ export class SessionStorage {
 			};
 
 			const filePath = this.getSessionFilePath(sessionId);
+			if (await this.plugin.app.vault.adapter.exists(filePath))
+				await this.readTranscript(sessionId);
 			await this.plugin.app.vault.adapter.write(
 				filePath,
 				JSON.stringify(data, null, 2),
@@ -422,33 +458,9 @@ export class SessionStorage {
 	async loadSessionMessages(
 		sessionId: string,
 	): Promise<ChatMessage[] | null> {
-		const filePath = this.getSessionFilePath(sessionId);
-		const adapter = this.plugin.app.vault.adapter;
-
-		if (!(await adapter.exists(filePath))) {
-			return null;
-		}
-
 		try {
-			const content = await adapter.read(filePath);
-			const data = JSON.parse(content) as SessionMessagesFile;
-
-			if (
-				typeof data.version !== "number" ||
-				!Array.isArray(data.messages)
-			) {
-				getLogger().debug(
-					`[SessionStorage] Invalid session file structure: ${filePath}`,
-				);
-				return null;
-			}
-
-			if (data.version !== 1) {
-				getLogger().debug(
-					`[SessionStorage] Unknown session file version: ${data.version}`,
-				);
-				return null;
-			}
+			const data = (await this.readTranscript(sessionId))?.data;
+			if (!data) return null;
 
 			const messages = data.messages.map((msg) => ({
 				...msg,
@@ -479,14 +491,9 @@ export class SessionStorage {
 			>
 		>
 	> {
-		const filePath = this.getSessionFilePath(sessionId);
-		const adapter = this.plugin.app.vault.adapter;
 		try {
-			if (!(await adapter.exists(filePath))) return {};
-			const data = JSON.parse(
-				await adapter.read(filePath),
-			) as SessionMessagesFile;
-			if (!data || typeof data !== "object") return {};
+			const data = (await this.readTranscript(sessionId))?.data;
+			if (!data) return {};
 			return {
 				cwd: data.cwd,
 				title: data.title,
@@ -510,16 +517,13 @@ export class SessionStorage {
 		sessionId: string,
 		newTitle: string,
 	): Promise<void> {
-		const filePath = this.getSessionFilePath(sessionId);
-		const adapter = this.plugin.app.vault.adapter;
 		try {
-			if (!(await adapter.exists(filePath))) return;
-			const data = JSON.parse(
-				await adapter.read(filePath),
-			) as SessionMessagesFile;
-			if (!data || typeof data !== "object") return;
-			data.title = newTitle;
-			await adapter.write(filePath, JSON.stringify(data, null, 2));
+			const record = await this.readTranscript(sessionId);
+			if (!record) return;
+			await this.plugin.app.vault.adapter.write(
+				record.path,
+				JSON.stringify({ ...record.data, title: newTitle }, null, 2),
+			);
 		} catch (error) {
 			getLogger().debug(
 				`[SessionStorage] Failed to sync transcript title: ${error}`,
@@ -532,11 +536,27 @@ export class SessionStorage {
 	 * Silently succeeds if file doesn't exist.
 	 */
 	async deleteSessionMessages(sessionId: string): Promise<void> {
-		const filePath = this.getSessionFilePath(sessionId);
+		return this.enqueueOperation(() =>
+			this.removeOwnedTranscripts(sessionId),
+		);
+	}
+	private async removeOwnedTranscripts(sessionId: string): Promise<void> {
 		const adapter = this.plugin.app.vault.adapter;
-
-		if (await adapter.exists(filePath)) {
-			await adapter.remove(filePath);
+		const legacy = this.getLegacySessionFilePath(sessionId);
+		const record = await this.readTranscript(sessionId);
+		if (!record) return;
+		// Remove an identified legacy copy first so it cannot reappear after deletion.
+		if (record.path !== legacy && (await adapter.exists(legacy))) {
+			const data = JSON.parse(
+				await adapter.read(legacy),
+			) as SessionMessagesFile | null;
+			if (
+				data?.version === 1 &&
+				data.sessionId === sessionId &&
+				Array.isArray(data.messages)
+			)
+				await adapter.remove(legacy);
 		}
+		await adapter.remove(record.path);
 	}
 }

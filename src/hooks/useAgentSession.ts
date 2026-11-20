@@ -53,7 +53,7 @@ export interface UseAgentSessionReturn {
 		overrideCwd?: string,
 	) => Promise<void>;
 	closeSession: () => Promise<void>;
-	forceRestartAgent: () => Promise<void>;
+	forceRestartAgent: (restoreId?: string, cwd?: string) => Promise<void>;
 	cancelOperation: () => Promise<void>;
 	getAvailableAgents: () => AgentDisplayInfo[];
 	updateSessionFromLoad: (
@@ -174,7 +174,11 @@ export function useAgentSession(
 	// ============================================================
 
 	const createSession = useCallback(
-		async (overrideAgentId?: string, overrideCwd?: string) => {
+		async (
+			overrideAgentId?: string,
+			overrideCwd?: string,
+			restoreId?: string,
+		) => {
 			const generation = ++createGenerationRef.current;
 			const effectiveCwd = overrideCwd || workingDirectory;
 			const settings = settingsAccess.getSnapshot();
@@ -226,8 +230,25 @@ export function useAgentSession(
 						? await agentClient.initialize(agentConfig)
 						: null;
 
-				const sessionResult =
-					await agentClient.newSession(effectiveCwd);
+				const capabilities =
+					agentClient.getSessionRestoreCapabilities();
+				const sessionResult = !restoreId
+					? await agentClient.newSession(effectiveCwd)
+					: capabilities.load
+						? await agentClient.loadSession(restoreId, effectiveCwd)
+						: capabilities.resume
+							? await agentClient.resumeSession(
+									restoreId,
+									effectiveCwd,
+								)
+							: null;
+				if (
+					!sessionResult ||
+					(restoreId && sessionResult.sessionId !== restoreId)
+				)
+					throw new Error(
+						"The agent could not restore the exact conversation",
+					);
 
 				// Pre-compute restored modes/configOptions BEFORE
 				// marking state as "ready" to avoid a UI race: without this,
@@ -337,11 +358,14 @@ export function useAgentSession(
 		}));
 	}, [agentClient]);
 
-	const forceRestartAgent = useCallback(async () => {
-		const currentAgentId = sessionRef.current.agentId;
-		await agentClient.disconnect();
-		await createSession(currentAgentId);
-	}, [agentClient, createSession]);
+	const forceRestartAgent = useCallback(
+		async (restoreId?: string, cwd?: string) => {
+			const currentAgentId = sessionRef.current.agentId;
+			await agentClient.disconnect();
+			await createSession(currentAgentId, cwd, restoreId);
+		},
+		[agentClient, createSession],
+	);
 
 	const cancelOperation = useCallback(async () => {
 		const s = sessionRef.current;

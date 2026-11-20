@@ -1,6 +1,7 @@
 import { Modal, Notice } from "obsidian";
 import { findNoteSessions } from "../services/note-session-index";
-import { compareSource } from "../services/source-comparison";
+import { compareSource, describeScope } from "../services/source-comparison";
+import type { ContextItem } from "../types/note-companion";
 import type AgentClientPlugin from "../plugin";
 import type { SavedSessionInfo } from "../types/session";
 import { computeDiffLines } from "../utils/diff-lines";
@@ -11,7 +12,7 @@ export async function openNoteSessionPicker(
 	options: {
 		open: (session: SavedSessionInfo, resume: boolean) => Promise<void>;
 		canResume: (session: SavedSessionInfo) => boolean;
-		newChat: () => Promise<void>;
+		newChat: (items: ContextItem[]) => Promise<void>;
 	},
 ) {
 	const matches = await findNoteSessions(
@@ -36,7 +37,7 @@ export async function openNoteSessionPicker(
 				text: "New conversation",
 			}).onclick = () => {
 				this.close();
-				run(options.newChat);
+				run(() => options.newChat([]));
 			};
 			if (!matches.length)
 				this.contentEl.createEl("p", {
@@ -61,19 +62,62 @@ export async function openNoteSessionPicker(
 						this.close();
 						run(() => options.open(session, true));
 					};
-				const prior = [...companion.sent]
+				const carry = card.createEl("details");
+				carry.createEl("summary", {
+					text: "New conversation with selected context",
+				});
+				const choices = companion.items
+					.filter((item) => item.role !== "destination")
+					.map((item) => {
+						const label = carry.createEl("label", {
+							cls: "xo-note-row",
+						});
+						const checkbox = label.createEl("input", {
+							type: "checkbox",
+						});
+						label.createSpan({
+							text: `${item.source.path} · ${item.scope.kind}`,
+						});
+						return { item, checkbox };
+					});
+				carry.createEl("button", {
+					text: "Stage checked context in a new chat (no send)",
+				}).onclick = () => {
+					this.close();
+					run(() =>
+						options.newChat(
+							choices
+								.filter(({ checkbox }) => checkbox.checked)
+								.map(({ item }) => item),
+						),
+					);
+				};
+				const sources = [...companion.sent]
 					.reverse()
-					.flatMap((turn) => turn.sources)
-					.find((item) => item.path === path);
-				if (!prior) {
+					.flatMap((turn) =>
+						turn.sources.filter(
+							(item) => (item.currentPath ?? item.path) === path,
+						),
+					);
+				if (!sources.length) {
 					card.createEl("p", {
 						text: "No confirmed sent snapshot is available.",
 					});
 					continue;
 				}
+				const picker = tools.createEl("select", {
+					attr: { "aria-label": "Sent snapshot to compare" },
+				});
+				for (const [index, source] of sources.entries())
+					picker.createEl("option", {
+						value: String(index),
+						text: `${describeScope(source.scope)} · ${new Date(source.capturedAt).toLocaleString()} · ${source.text.length} units · ${source.path}`,
+					});
 				tools.createEl("button", { text: "What changed?" }).onclick =
 					() =>
 						run(async () => {
+							const prior = sources[picker.selectedIndex];
+							if (!prior) return;
 							const file = plugin.app.vault.getFileByPath(path);
 							if (!file) {
 								card.createEl("p", {
@@ -88,6 +132,10 @@ export async function openNoteSessionPicker(
 								capturedAt: Date.now(),
 							};
 							const comparison = compareSource(prior, snapshot);
+							if (comparison.truncated)
+								card.createEl("p", {
+									text: "Only the transmitted prefix is compared; the remainder was not sent.",
+								});
 							const output = card.createEl("pre");
 							output.setText(
 								comparison.changed

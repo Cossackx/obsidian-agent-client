@@ -38,7 +38,11 @@ import type { AgentClientPluginSettings } from "../plugin";
 // Context imports
 import { useChatContext } from "./ChatContext";
 import { useNoteCompanion } from "../hooks/useNoteCompanion";
+import type { SavedSessionInfo } from "../types/session";
+import type { ContextItem } from "../types/note-companion";
 import { ContextTray, type StructuredTurn } from "./ContextTray";
+import { putItem } from "../services/companion-state";
+import { readCorrelatedReply } from "../services/passage-review";
 import { confirmPayload } from "./ContextPreviewModal";
 import { prepareContext } from "../services/context-builder";
 import {
@@ -83,6 +87,8 @@ import type { IChatViewHost } from "./view-host";
  * Used by ChatView / FloatingViewContainer to implement IChatViewContainer
  * by delegating to the React component's state and handlers.
  */
+const EMPTY_ATTACHMENTS: AttachedFile[] = [];
+
 export interface ChatPanelCallbacks {
 	getDisplayName: () => string;
 	getSessionStatus: () => SessionStatus;
@@ -357,15 +363,45 @@ export const ChatPanel = React.memo(function ChatPanel({
 	const [isUpdateAvailable, setIsUpdateAvailable] = useState(false);
 
 	// Input state (for broadcast commands)
-	const [inputValue, setInputValue] = useState("");
-	const companion = useNoteCompanion(session.sessionId, setInputValue);
+	const [input, setInput] = useState<{ owner: string | null; text: string }>({
+		owner: null,
+		text: "",
+	});
+	const ownerRef = useRef(session.sessionId);
+	const ownerLease = useRef({ id: session.sessionId });
+	if (ownerLease.current.id !== session.sessionId)
+		ownerLease.current = { id: session.sessionId };
+	const lease = ownerLease.current;
+	ownerRef.current = session.sessionId;
+	const composerRevision = useRef(0);
+	const inputValue = input.owner === session.sessionId ? input.text : "";
+	const updateInput = (text: string) => {
+		if (ownerLease.current !== lease) return;
+		composerRevision.current++;
+		setInput({ owner: session.sessionId, text });
+	};
+	const companion = useNoteCompanion(session.sessionId, updateInput);
 	const updateCompanionDraft = (text: string) => {
-		setInputValue(text);
+		if (ownerLease.current !== lease) return;
+		updateInput(text);
 		companion.setDraft(text);
 	};
 	const updateDraftRef = useRef(updateCompanionDraft);
 	updateDraftRef.current = updateCompanionDraft;
 	const preparingCompanion = useRef(false);
+	const changingOwner = useRef(false);
+	const historyOwner = useRef<SavedSessionInfo | null>(null);
+	const knownRoute = useRef<{
+		sessionId: string;
+		agentId: string;
+		cwd: string;
+	} | null>(null);
+	if (isSessionReady && session.sessionId && !changingOwner.current)
+		knownRoute.current = {
+			sessionId: session.sessionId,
+			agentId: session.agentId,
+			cwd: agentCwd,
+		};
 	const [previewing, setPreviewing] = useState(false);
 	const sendEpoch = useRef(0);
 	useEffect(
@@ -378,7 +414,63 @@ export const ChatPanel = React.memo(function ChatPanel({
 		if (session.sessionId && variant === "sidebar")
 			void plugin.app.workspace.requestSaveLayout();
 	}, [session.sessionId, variant, plugin]);
-	const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
+	const [staged, setStaged] = useState<{
+		owner: string | null;
+		files: AttachedFile[];
+	}>({ owner: null, files: [] });
+	const attachedFiles =
+		staged.owner === session.sessionId ? staged.files : EMPTY_ATTACHMENTS;
+	const setAttachedFiles = (change: React.SetStateAction<AttachedFile[]>) => {
+		const owner = session.sessionId;
+		if (ownerLease.current !== lease) return;
+		composerRevision.current++;
+		setStaged((old) => ({
+			owner,
+			files:
+				typeof change === "function"
+					? change(old.owner === owner ? old.files : [])
+					: change,
+		}));
+	};
+	const stageSelection = useRef<
+		Parameters<typeof plugin.registerCompanionSelection>[1]
+	>(async () => undefined);
+	stageSelection.current = async (source, range) => {
+		const id = session.sessionId;
+		if (
+			!id ||
+			companion.state?.sessionId !== id ||
+			changingOwner.current ||
+			preparingCompanion.current ||
+			isSending
+		)
+			throw new Error(
+				"The target conversation is not ready to stage context.",
+			);
+		await plugin.companionStorage.update(id, (old) => {
+			if (ownerRef.current !== id || changingOwner.current)
+				throw new Error(
+					"Conversation changed before staging selection",
+				);
+			return putItem(old, {
+				id: crypto.randomUUID(),
+				source,
+				scope: { kind: "passage", range },
+				role: "reference",
+				lifetime: "turn",
+			});
+		});
+		new Notice(`Selection staged from ${source.path}. Nothing was sent.`);
+	};
+	useEffect(
+		() =>
+			plugin.registerCompanionSelection(viewId, (source, range) =>
+				stageSelection.current(source, range),
+			),
+		[plugin, viewId],
+	);
+	const stageFilesRef = useRef(setAttachedFiles);
+	stageFilesRef.current = setAttachedFiles;
 
 	// Which tool calls are expanded. Held here rather than inside the rows
 	// because the virtualized list unmounts anything scrolled out of view.
@@ -534,7 +626,13 @@ export const ChatPanel = React.memo(function ChatPanel({
 		turn?: StructuredTurn,
 	) => {
 		setGeminiNoticeDismissed(true);
-		if (!isSessionReady || isSending || preparingCompanion.current)
+		if (
+			!isSessionReady ||
+			isSending ||
+			preparingCompanion.current ||
+			changingOwner.current ||
+			ownerRef.current !== session.sessionId
+		)
 			return false;
 		const snapshot = companion.state;
 		if (!snapshot) {
@@ -544,6 +642,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 		preparingCompanion.current = true;
 		setPreviewing(true);
 		const epoch = sendEpoch.current;
+		const requestId = turn?.onReply ? crypto.randomUUID() : undefined;
 		try {
 			const items = [...(turn?.items ?? snapshot?.items ?? [])];
 			if (snapshot?.destination)
@@ -574,6 +673,10 @@ export const ChatPanel = React.memo(function ChatPanel({
 				}),
 			);
 			const prepared = prepareContext(assessed, {
+				excludedPaths: snapshot.items
+					.filter((item) => item.role === "destination")
+					.map((item) => item.source.path),
+				quotes: turn?.quotes,
 				embeddedContext:
 					session.promptCapabilities?.embeddedContext ?? false,
 				maxNoteLength: plugin.settings.displaySettings.maxNoteLength,
@@ -581,20 +684,48 @@ export const ChatPanel = React.memo(function ChatPanel({
 					plugin.settings.displaySettings.maxSelectionLength,
 			});
 			if (epoch !== sendEpoch.current) return false;
-			return await handleSendMessage(content, attachments, {
-				preparedContext: prepared,
-				approvePayload: async (blocks) =>
-					(await confirmPayload(
-						plugin.app,
-						blocks,
-						prepared.notices,
-					)) && epoch === sendEpoch.current,
-				onConfirmed: (text, id) => {
-					if (prepared.sources.length)
-						void companion.confirmed(prepared, id);
-					turn?.onReply?.(text, id);
+			return await handleSendMessage(
+				turn?.intent ?? content,
+				attachments,
+				{
+					preparedContext: prepared,
+					generatedInstruction: requestId
+						? `${turn?.text} Wrap that exact result in this JSON object: {"requestId":${JSON.stringify(requestId)},"result":<the requested value>}. Echo the requestId verbatim and emit only that JSON object.`
+						: turn?.text,
+					collectStructuredReply:
+						requestId !== undefined || !!turn?.afterReply,
+					approvePayload: async (blocks) =>
+						(await confirmPayload(
+							plugin.app,
+							blocks,
+							prepared.notices,
+						)) &&
+						epoch === sendEpoch.current &&
+						ownerRef.current === snapshot.sessionId &&
+						!changingOwner.current,
+					onConfirmed: (text, id, assistantId, sources) => {
+						if (sources.length)
+							void companion.confirmed(
+								{ ...prepared, sources },
+								id,
+							);
+						if (assistantId && epoch === sendEpoch.current)
+							turn?.afterReply?.(assistantId);
+						if (requestId && epoch === sendEpoch.current) {
+							try {
+								turn?.onReply?.(
+									readCorrelatedReply(text, requestId),
+									assistantId,
+								);
+							} catch {
+								new Notice(
+									"The reply did not match this request. No write actions were created.",
+								);
+							}
+						}
+					},
 				},
-			});
+			);
 		} catch (error) {
 			new Notice(
 				error instanceof Error
@@ -607,12 +738,26 @@ export const ChatPanel = React.memo(function ChatPanel({
 			setPreviewing(false);
 		}
 	};
-	const handleSendMessageWithGeminiDismiss = (
+	const handleSendMessageWithGeminiDismiss = async (
 		content: string,
 		attachments?: AttachedFile[],
-	) => sendWithCompanion(content, attachments);
-	const sendCurrentRef = useRef(sendWithCompanion);
-	sendCurrentRef.current = sendWithCompanion;
+	) => {
+		const revision = composerRevision.current;
+		const owner = session.sessionId;
+		const ok = await sendWithCompanion(content, attachments);
+		if (
+			ok &&
+			owner === ownerRef.current &&
+			lease === ownerLease.current &&
+			revision === composerRevision.current
+		) {
+			updateDraftRef.current("");
+			stageFilesRef.current([]);
+		}
+		return ok;
+	};
+	const sendCurrentRef = useRef(handleSendMessageWithGeminiDismiss);
+	sendCurrentRef.current = handleSendMessageWithGeminiDismiss;
 
 	const { handleOpenHistory } = useHistoryModal(
 		plugin,
@@ -1443,7 +1588,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 				updateDraftRef.current(prompt);
 				// Injected prompts are a fresh message — don't carry over any
 				// attachments already staged in this panel (#341/#6).
-				setAttachedFiles([]);
+				stageFilesRef.current([]);
 				if (autoSend) setPendingAutoSend(prompt);
 			},
 		);
@@ -1461,10 +1606,8 @@ export const ChatPanel = React.memo(function ChatPanel({
 
 		const prompt = pendingAutoSend;
 		setPendingAutoSend(null);
-		void sendCurrentRef.current(prompt).then((confirmed) => {
-			if (confirmed && inputValueRef.current === prompt)
-				updateDraftRef.current("");
-		});
+		if (inputValueRef.current === prompt)
+			void sendCurrentRef.current(prompt);
 	}, [
 		pendingAutoSend,
 		companion.state,
@@ -1546,7 +1689,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 			}),
 			setInputState: (state) => {
 				updateDraftRef.current(state.text);
-				setAttachedFiles(state.files);
+				stageFilesRef.current(state.files);
 			},
 			canSend: () => {
 				const hasContent =
@@ -1580,19 +1723,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 				const messageToSend = currentInput.trim();
 				const filesToSend =
 					currentFiles.length > 0 ? [...currentFiles] : undefined;
-				const confirmed = await sendCurrentRef.current(
-					messageToSend,
-					filesToSend,
-				);
-				if (
-					confirmed &&
-					inputValueRef.current === currentInput &&
-					attachedFilesRef.current === currentFiles
-				) {
-					updateDraftRef.current("");
-					setAttachedFiles([]);
-				}
-				return confirmed;
+				return sendCurrentRef.current(messageToSend, filesToSend);
 			},
 			cancelOperation: async () => {
 				if (isSendingRef.current) {
@@ -1696,42 +1827,58 @@ export const ChatPanel = React.memo(function ChatPanel({
 
 	const [reconnecting, setReconnecting] = useState(false);
 	const reconnect = async () => {
-		if (reconnecting || preparingCompanion.current || isSending) return;
-		setReconnecting(true);
+		if (changingOwner.current || preparingCompanion.current || isSending)
+			return;
 		const id = session.sessionId;
-		const history = messages;
-		companion.flush();
-		try {
-			await agent.forceRestartAgent();
-			if (!id) return;
-			const cap = acpClient.getSessionRestoreCapabilities();
-			agent.setIgnoreUpdates(true);
-			const result = cap.load
-				? await acpClient.loadSession(id, agentCwd)
-				: cap.resume
-					? await acpClient.resumeSession(id, agentCwd)
-					: null;
-			if (!result) await acpClient.disconnect();
-			await agent.updateSessionFromLoad(
-				id,
-				result?.modes,
-				result?.configOptions,
+		const route =
+			historyOwner.current?.sessionId === id
+				? historyOwner.current
+				: (plugin.settingsService
+						.getSavedSessions()
+						.find((row) => row.sessionId === id) ??
+					(knownRoute.current?.sessionId === id
+						? knownRoute.current
+						: null));
+		if (
+			id &&
+			(!route ||
+				route.agentId !== session.agentId ||
+				route.cwd !== agentCwd)
+		) {
+			new Notice(
+				"History only. Reconnect requires the saved agent and working directory.",
 			);
-			agent.setMessagesFromLocal(history);
-			if (!result)
-				new Notice(
-					"This agent does not support resume. History and draft remain local; start a new conversation to send.",
-				);
+			return;
+		}
+		let release: (() => void) | undefined;
+		try {
+			if (id) release = plugin.viewRegistry.reserveRestore(id, viewId);
+		} catch {
+			new Notice("This conversation already has another owner view.");
+			return;
+		}
+		changingOwner.current = true;
+		setReconnecting(true);
+		const history = messages;
+		try {
+			await companion.flush();
+			agent.setIgnoreUpdates(true);
+			await agent.forceRestartAgent(id ?? undefined, route?.cwd);
+			if (id && !acpClient.hasLiveSession(id))
+				throw new Error("Restore not confirmed");
+			if (id) agent.setMessagesFromLocal(history);
 		} catch {
 			await acpClient.disconnect().catch(() => undefined);
 			if (id) await agent.updateSessionFromLoad(id);
 			agent.setMessagesFromLocal(history);
 			new Notice(
-				"Reconnect did not restore the conversation. Nothing was resent.",
+				"Reconnect did not restore the conversation. History remains local; nothing was resent.",
 			);
 		} finally {
 			agent.setIgnoreUpdates(false);
+			changingOwner.current = false;
 			setReconnecting(false);
+			release?.();
 		}
 	};
 	const companionStatus = deriveCompanionStatus({
@@ -1776,7 +1923,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 						<button
 							type="button"
 							onClick={() => {
-								companion.flush();
+								void companion.flush();
 								void viewHost
 									.showInEditorTab?.()
 									.catch(
@@ -1792,7 +1939,30 @@ export const ChatPanel = React.memo(function ChatPanel({
 					)}
 				</div>
 			</details>
+			{companion.warning && (
+				<p role="alert" className="xo-note-warning">
+					{companion.warning}{" "}
+					<button
+						type="button"
+						onClick={() => void companion.retry()}
+					>
+						Retry local save or load
+					</button>
+				</p>
+			)}
+			{actions.unsavedIndex && (
+				<p role="alert" className="xo-note-warning">
+					Turn sent; local conversation index unsaved.{" "}
+					<button
+						type="button"
+						onClick={() => void actions.retryIndex()}
+					>
+						Retry index only
+					</button>
+				</p>
+			)}
 			<ContextTray
+				key={session.sessionId ?? "unbound"}
 				companion={companion}
 				activePath={
 					settings.autoMentionActiveNote &&
@@ -1809,16 +1979,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 						);
 						return false;
 					}
-					const ok = await sendCurrentRef.current(text.trim(), files);
-					if (
-						ok &&
-						inputValueRef.current === text &&
-						attachedFilesRef.current === files
-					) {
-						updateDraftRef.current("");
-						setAttachedFiles([]);
-					}
-					return ok;
+					return sendCurrentRef.current(text.trim(), files);
 				}}
 				messages={messages}
 				canSend={isSessionReady && !reconnecting}
@@ -1840,46 +2001,96 @@ export const ChatPanel = React.memo(function ChatPanel({
 					await openNoteSessionPicker(plugin, path, {
 						canResume: (saved) =>
 							saved.agentId === session.agentId &&
+							saved.cwd === agentCwd &&
 							sessionHistory.canRestore &&
 							acpClient.isInitialized(),
-						newChat: async () => {
-							companion.flush();
-							await handleNewChatWithPersist();
+						newChat: async (selected: ContextItem[]) => {
+							if (
+								ownerRef.current !== session.sessionId ||
+								changingOwner.current ||
+								preparingCompanion.current ||
+								isSending
+							)
+								return;
+							changingOwner.current = true;
+							setReconnecting(true);
+							try {
+								await companion.flush();
+								await handleNewChatWithPersist();
+								const id = acpClient.getConfirmedSessionId();
+								if (!id || id === session.sessionId) return;
+								if (selected.length)
+									await plugin.companionStorage.update(
+										id,
+										(old) => ({
+											...old,
+											items: selected.map((item) => ({
+												...item,
+												id: crypto.randomUUID(),
+											})),
+										}),
+									);
+							} finally {
+								changingOwner.current = false;
+								setReconnecting(false);
+							}
 						},
 						open: async (saved, resume) => {
-							companion.flush();
-							if (resume) {
-								const alreadyOpen = plugin.viewRegistry
-									.getAll()
-									.find(
-										(view) =>
-											view.viewId !== viewId &&
-											view.getSessionId() ===
+							if (
+								ownerRef.current !== session.sessionId ||
+								changingOwner.current ||
+								preparingCompanion.current ||
+								isSending
+							)
+								return;
+							const compatible =
+								saved.agentId === session.agentId &&
+								saved.cwd === agentCwd &&
+								acpClient.getCurrentAgentId() === saved.agentId;
+							const release =
+								resume && compatible
+									? plugin.viewRegistry.reserveRestore(
+											saved.sessionId,
+											viewId,
+										)
+									: undefined;
+							changingOwner.current = true;
+							setReconnecting(true);
+							try {
+								await companion.flush();
+								historyOwner.current = saved;
+								if (release) {
+									try {
+										await sessionHistory.restoreSession(
+											saved.sessionId,
+											saved.cwd,
+										);
+										if (
+											acpClient.hasLiveSession(
 												saved.sessionId,
-									);
-								if (alreadyOpen)
-									throw new Error(
-										"This conversation already has an open owner view",
-									);
-								try {
-									await sessionHistory.restoreSession(
-										saved.sessionId,
-										saved.cwd,
-									);
-									return;
-								} catch {
-									new Notice(
-										"Resume failed; opening local history without a connection.",
-									);
+											)
+										)
+											return;
+									} catch {
+										new Notice(
+											"Resume failed; opening local history without a connection.",
+										);
+									}
 								}
-							}
-							const history =
-								await plugin.settingsService.loadSessionMessages(
+								const history =
+									await plugin.settingsService.loadSessionMessages(
+										saved.sessionId,
+									);
+								await acpClient.disconnect();
+								await agent.updateSessionFromLoad(
 									saved.sessionId,
 								);
-							await acpClient.disconnect();
-							await agent.updateSessionFromLoad(saved.sessionId);
-							agent.setMessagesFromLocal(history ?? []);
+								agent.setMessagesFromLocal(history ?? []);
+							} finally {
+								release?.();
+								changingOwner.current = false;
+								setReconnecting(false);
+							}
 						},
 					});
 				}}
@@ -1888,6 +2099,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 	);
 	const inputAreaElement = (
 		<InputArea
+			key={session.sessionId ?? "unbound"}
 			isSending={isSending}
 			isSessionReady={isSessionReady}
 			isRestoringSession={sessionHistory.loading}

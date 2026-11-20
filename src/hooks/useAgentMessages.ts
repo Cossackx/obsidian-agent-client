@@ -43,8 +43,15 @@ import {
  */
 export interface SendMessageOptions {
 	preparedContext?: PreparedContext;
+	generatedInstruction?: string;
 	approvePayload?: (blocks: readonly PromptContent[]) => Promise<boolean>;
-	onConfirmed?: (reply: string, userMessageId: string) => void;
+	collectStructuredReply?: boolean;
+	onConfirmed?: (
+		reply: string,
+		userMessageId: string,
+		assistantId: string,
+		sources: PreparedContext["sources"],
+	) => void;
 	/** Currently active note for auto-mention */
 	activeNote: NoteMetadata | null;
 	/** Vault base path for mention resolution */
@@ -165,7 +172,9 @@ export function useAgentMessages(
 				update.type === "agent_message_chunk" &&
 				replyRef.current?.sessionId === update.sessionId
 			) {
-				replyRef.current.text += update.text;
+				if (replyRef.current.text.length <= 180_000)
+					replyRef.current.text += update.text;
+				return;
 			}
 			// Some agents echo the prompt back as a user_message_chunk while
 			// the prompt RPC is still open; the transcript already holds it.
@@ -329,6 +338,7 @@ export function useAgentMessages(
 				const prepared = await preparePrompt(
 					{
 						message: content,
+						generatedInstruction: options.generatedInstruction,
 						preparedContext: options.preparedContext,
 						images: options.images,
 						resourceLinks: options.resourceLinks,
@@ -418,7 +428,8 @@ export function useAgentMessages(
 
 				const sendPromise = (async () => {
 					const reply = { sessionId: currentSessionId, text: "" };
-					replyRef.current = reply;
+					if (options.collectStructuredReply)
+						replyRef.current = reply;
 					try {
 						const result = await sendPreparedPrompt(
 							{
@@ -439,7 +450,32 @@ export function useAgentMessages(
 						if (result.success) {
 							setIsSending(false);
 							setLastUserMessage(null);
-							options.onConfirmed?.(reply.text, userMessage.id);
+							const assistantId = reply.text
+								? crypto.randomUUID()
+								: "";
+							if (assistantId)
+								addMessage({
+									id: assistantId,
+									role: "assistant",
+									content: [
+										{ type: "text", text: reply.text },
+									],
+									timestamp: new Date(),
+								});
+							try {
+								options.onConfirmed?.(
+									reply.text,
+									userMessage.id,
+									assistantId,
+									prepared.sources,
+								);
+							} catch {
+								setErrorInfo({
+									title: "Turn sent",
+									message:
+										"The local response action could not be completed. Do not resend the turn.",
+								});
+							}
 						} else {
 							setIsSending(false);
 							setErrorInfo(
@@ -504,7 +540,7 @@ export function useAgentMessages(
 	const hasActivePermission = activePermission !== null;
 
 	const approvePermission = useCallback(
-		async (requestId: string, optionId: string): Promise<void> => {
+		async (requestId: string, optionId: string | null): Promise<void> => {
 			try {
 				await agentClient.respondToPermission(requestId, optionId);
 			} catch (error) {
@@ -532,15 +568,14 @@ export function useAgentMessages(
 	const rejectActivePermission = useCallback(async (): Promise<boolean> => {
 		if (!activePermission || activePermission.options.length === 0)
 			return false;
-		const option = selectOption(
-			activePermission.options,
-			["reject_once", "reject_always"],
-			(opt) =>
-				opt.name.toLowerCase().includes("reject") ||
-				opt.name.toLowerCase().includes("deny"),
+		const option = selectOption(activePermission.options, [
+			"reject_once",
+			"reject_always",
+		]);
+		await approvePermission(
+			activePermission.requestId,
+			option?.optionId ?? null,
 		);
-		if (!option) return false;
-		await approvePermission(activePermission.requestId, option.optionId);
 		return true;
 	}, [activePermission, approvePermission]);
 

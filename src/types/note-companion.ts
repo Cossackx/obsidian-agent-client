@@ -1,3 +1,8 @@
+export interface SourcePosition {
+	line: number;
+	ch: number;
+}
+
 export interface TextRange {
 	start: number;
 	end: number;
@@ -53,6 +58,8 @@ export interface CompanionState {
 	sessionId: string;
 	items: ContextItem[];
 	draft: string;
+	compact?: boolean;
+	favourites?: string[];
 	destination: DestinationAnchor | null;
 	operations: { proposal: NoteEditProposal; receipt: WriteReceipt }[];
 	sent: {
@@ -62,6 +69,9 @@ export interface CompanionState {
 			text: string;
 			capturedAt: number;
 			scope: ContextScope;
+			originalLength?: number;
+			currentPath?: string;
+			positions?: { from: SourcePosition; to: SourcePosition };
 		}[];
 	}[];
 }

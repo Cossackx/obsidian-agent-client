@@ -213,6 +213,22 @@ export interface IChatViewContainer {
 
 export class ChatViewRegistry {
 	private views = new Map<string, IChatViewContainer>();
+	private restoreReservations = new Set<string>();
+
+	reserveRestore(sessionId: string, viewId: string): () => void {
+		if (
+			this.restoreReservations.has(sessionId) ||
+			this.getAll().some(
+				(view) =>
+					view.viewId !== viewId && view.getSessionId() === sessionId,
+			)
+		)
+			throw new Error("This conversation already has an open owner view");
+		this.restoreReservations.add(sessionId);
+		return () => {
+			this.restoreReservations.delete(sessionId);
+		};
+	}
 	private focusedViewId: string | null = null;
 	private logger = getLogger();
 	private changeListeners = new Set<() => void>();

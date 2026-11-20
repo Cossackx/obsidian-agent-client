@@ -1,3 +1,4 @@
+import { createHash } from "crypto";
 import { describe, it, expect, vi } from "vitest";
 import { SessionStorage } from "../src/services/session-storage";
 import type { SavedSessionInfo } from "../src/types/session";
@@ -16,6 +17,8 @@ type StorageState = {
 // Vault#configDir, not assume the default config folder.
 const CONFIG_DIR = "test-config";
 const SESSIONS_DIR = `${CONFIG_DIR}/plugins/agent-client/sessions`;
+const newFilePath = (sessionId: string) =>
+	`${SESSIONS_DIR}/transcript.${createHash("sha256").update(sessionId, "utf16le").digest("hex")}.json`;
 const filePath = (sessionId: string) => `${SESSIONS_DIR}/${sessionId}.json`;
 
 function makeSession(
@@ -375,7 +378,7 @@ describe("SessionStorage — transcript metadata snapshot (self-contained archiv
 		timestamp: new Date("2026-03-01T00:00:00.000Z"),
 	});
 	const parseFile = (files: Map<string, string>, sessionId: string) =>
-		JSON.parse(files.get(filePath(sessionId)) as string) as Record<
+		JSON.parse(files.get(newFilePath(sessionId)) as string) as Record<
 			string,
 			unknown
 		>;
@@ -501,10 +504,10 @@ describe("SessionStorage — rename syncs the transcript's title snapshot", () =
 
 		await storage.updateSessionTitle("s1", "renamed");
 
-		const data = JSON.parse(files.get(filePath("s1")) as string) as Record<
-			string,
-			unknown
-		>;
+		const data = JSON.parse(
+			(files.get(newFilePath("s1")) ??
+				files.get(filePath("s1"))) as string,
+		) as Record<string, unknown>;
 		expect(data.title).toBe("renamed");
 		expect(data.messages as unknown[]).toHaveLength(1);
 		expect(data.cwd).toBe("/vault");
@@ -583,10 +586,10 @@ describe("SessionStorage — rename syncs the transcript's title snapshot", () =
 
 		// The save serializes behind the rename on the session lock, so the
 		// final file carries BOTH the new title and the newer messages.
-		const data = JSON.parse(files.get(filePath("s1")) as string) as Record<
-			string,
-			unknown
-		>;
+		const data = JSON.parse(
+			(files.get(newFilePath("s1")) ??
+				files.get(filePath("s1"))) as string,
+		) as Record<string, unknown>;
 		expect(data.title).toBe("renamed");
 		expect(data.messages as unknown[]).toHaveLength(1);
 	});
@@ -668,4 +671,26 @@ describe("SessionStorage — stored permissions are settled on load", () => {
 		expect(permission?.selectedOptionId).toBe("allow");
 		expect(permission?.isCancelled).toBeUndefined();
 	});
+});
+
+it("does not read, replace, or delete a transcript owned by a colliding legacy ID", async () => {
+	const { storage, files } = makeStorage();
+	const old = filePath("team_a");
+	const legacy = JSON.stringify({
+		version: 1,
+		sessionId: "team:a",
+		messages: [],
+	});
+	files.set(old, legacy);
+	expect(await storage.loadSessionMessages("team_a")).toBeNull();
+	await storage.deleteSessionMessages("team_a");
+	expect(files.get(old)).toBe(legacy);
+	await storage.saveSessionMessages("team_a", "fixture", []);
+	await storage.saveSessionMessages("team:a", "fixture", []);
+	expect(await storage.loadSessionMessages("team_a")).toEqual([]);
+	expect(await storage.loadSessionMessages("team:a")).toEqual([]);
+	await storage.deleteSessionMessages("team_a");
+	expect(await storage.loadSessionMessages("team_a")).toBeNull();
+	expect(await storage.loadSessionMessages("team:a")).toEqual([]);
+	expect(files.get(old)).toBe(legacy);
 });

@@ -323,11 +323,22 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 		return Promise.resolve(metadata);
 	}
 
-	async captureActiveSelection(): Promise<
-		(SourceSnapshot & { range: TextRange }) | null
-	> {
-		const view =
-			this.plugin.app.workspace.getActiveViewOfType(MarkdownView);
+	async captureActiveSelection(
+		allowCaret = false,
+	): Promise<(SourceSnapshot & { range: TextRange }) | null> {
+		const workspace = this.plugin.app.workspace;
+		const active = workspace.getActiveViewOfType(MarkdownView);
+		const file = workspace.getActiveFile();
+		const open = workspace
+			.getLeavesOfType("markdown")
+			.flatMap(({ view }) =>
+				view instanceof MarkdownView &&
+				view.file === file &&
+				view.getMode() === "source"
+					? [view]
+					: [],
+			);
+		const view = active ?? (open.length === 1 ? open[0] : null);
 		if (view?.file && view.getMode() === "source") {
 			const selection = view.editor.listSelections()[0];
 			if (!selection) return null;
@@ -337,10 +348,11 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 				selection.anchor,
 				selection.head ?? selection.anchor,
 			);
-			return range.start < range.end
+			return allowCaret || range.start < range.end
 				? { path: view.file.path, text, range, capturedAt: Date.now() }
 				: null;
 		}
+		if (allowCaret) return null;
 		const note = await this.getActiveNote();
 		return note && this.currentSelection?.filePath === note.path
 			? (this.currentSelection.snapshot ?? null)

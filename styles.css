@@ -2896,3 +2896,8 @@ If your plugin does not need CSS, delete this file.
 	width: 16px;
 	height: 16px;
 }
+.xo-note-preview-image {
+	max-width: 100%;
+	max-height: 50vh;
+	object-fit: contain;
+}

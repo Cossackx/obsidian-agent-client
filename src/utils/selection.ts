@@ -30,6 +30,27 @@ export function extractSelection(
 	return { text: text.slice(start, end), range: { start, end } };
 }
 
+/** Map editor offsets into the exact saved preimage, tolerating EOL representation only. */
+export function mapStoredRange(
+	buffer: string,
+	stored: string,
+	range: TextRange,
+): TextRange {
+	const normalize = (value: string) => value.replace(/\r\n|\r/g, "\n");
+	if (normalize(buffer) !== normalize(stored))
+		throw new Error(
+			"The editor has unsaved changes. Save before placing a reply.",
+		);
+	if (range.start < 0 || range.end < range.start || range.end > buffer.length)
+		throw new RangeError("Invalid editor range");
+	function position(offset: number) {
+		const lines = normalize(buffer.slice(0, offset)).split("\n");
+		return { line: lines.length - 1, ch: lines.at(-1)?.length ?? 0 };
+	}
+	return extractSelection(stored, position(range.start), position(range.end))
+		.range;
+}
+
 /** Do not split a Unicode surrogate pair at a truncation boundary. */
 export function truncateText(text: string, limit: number): string {
 	if (limit >= text.length) return text;

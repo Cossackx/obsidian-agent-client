@@ -15,7 +15,9 @@ export async function findNoteSessions(
 			(companion.destination?.path === path ||
 				companion.items.some((item) => item.source.path === path) ||
 				companion.sent.some((turn) =>
-					turn.sources.some((item) => item.path === path),
+					turn.sources.some(
+						(item) => (item.currentPath ?? item.path) === path,
+					),
 				))
 		)
 			result.push({ session, companion });
@@ -34,7 +36,9 @@ export function renameNoteAssociation(
 		state.destination?.path !== from &&
 		!state.items.some((item) => item.source.path === from) &&
 		!state.sent.some((turn) =>
-			turn.sources.some((source) => source.path === from),
+			turn.sources.some(
+				(source) => (source.currentPath ?? source.path) === from,
+			),
 		)
 	)
 		return state;
@@ -56,7 +60,9 @@ export function renameNoteAssociation(
 		sent: state.sent.map((turn) => ({
 			...turn,
 			sources: turn.sources.map((source) =>
-				source.path === from ? { ...source, path: to } : source,
+				(source.currentPath ?? source.path) === from
+					? { ...source, currentPath: to }
+					: source,
 			),
 		})),
 	};

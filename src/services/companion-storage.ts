@@ -5,6 +5,7 @@ import type {
 	DestinationAnchor,
 	NoteEditProposal,
 	TextRange,
+	WriteReceipt,
 } from "../types/note-companion";
 import { isNotePath } from "./context-builder";
 import { emptyCompanion } from "./companion-state";
@@ -87,6 +88,10 @@ function assertState(
 	if (
 		value.sessionId !== id ||
 		!str(value.draft) ||
+		(value.compact !== undefined && typeof value.compact !== "boolean") ||
+		(value.favourites !== undefined &&
+			(!Array.isArray(value.favourites) ||
+				!value.favourites.every(str))) ||
 		!(value.destination === null || destination(value.destination)) ||
 		!Array.isArray(value.items) ||
 		!value.items.every(
@@ -120,7 +125,15 @@ function assertState(
 				Array.isArray(turn.sources) &&
 				turn.sources.every(
 					(item: unknown) =>
-						object(item) && source(item) && scope(item.scope),
+						object(item) &&
+						scope(item.scope) &&
+						(item.currentPath === undefined ||
+							path(item.currentPath)) &&
+						(item.originalLength === undefined ||
+							(typeof item.originalLength === "number" &&
+								Number.isSafeInteger(item.originalLength) &&
+								item.originalLength >= 0)) &&
+						source(item),
 				),
 		)
 	) {
@@ -148,6 +161,14 @@ function filename(sessionId: string): string {
 	return `v1-${encoded}.companion.json`;
 }
 
+function isUnresolved(status: WriteReceipt["status"]): boolean {
+	return (
+		status === "pending" ||
+		status === "unknown" ||
+		status === "undo-pending"
+	);
+}
+
 /** One plugin-scoped store; serializes snapshots, receipts and deletion across views. */
 export class CompanionStorage {
 	private tail: Promise<void> = Promise.resolve();
@@ -156,7 +177,7 @@ export class CompanionStorage {
 	constructor(
 		private adapter: Pick<
 			DataAdapter,
-			"exists" | "read" | "write" | "mkdir" | "remove"
+			"exists" | "read" | "write" | "mkdir" | "remove" | "list"
 		>,
 		private directory: string,
 	) {}
@@ -171,12 +192,102 @@ export class CompanionStorage {
 	private file(sessionId: string): string {
 		return `${this.directory}/${filename(sessionId)}`;
 	}
+	private async slots(sessionId: string) {
+		const primary = this.file(sessionId);
+		const valid: {
+			path: string;
+			revision: number;
+			state: CompanionState;
+		}[] = [];
+		let torn = false;
+		for (const path of [primary, `${primary}.next`]) {
+			if (!(await this.adapter.exists(path))) continue;
+			const raw = await this.adapter.read(path);
+			let record: unknown;
+			try {
+				record = JSON.parse(raw) as unknown;
+			} catch {
+				torn = true;
+				continue;
+			}
+			// Never replace a recognized but unsupported schema or identity.
+			let revision = 0;
+			if (
+				typeof record === "object" &&
+				record !== null &&
+				"revision" in record
+			) {
+				if (
+					typeof record.revision !== "number" ||
+					!Number.isSafeInteger(record.revision) ||
+					record.revision < 1 ||
+					!("state" in record)
+				)
+					throw new Error("Unsupported companion recovery record");
+				revision = record.revision;
+				record = record.state;
+			}
+			assertState(record, sessionId);
+			valid.push({ path, revision, state: record });
+		}
+		if (!valid.length && torn)
+			throw new Error(
+				"Companion state is damaged and no intact copy is available",
+			);
+		return valid.sort((a, b) => b.revision - a.revision);
+	}
 	private async read(sessionId: string): Promise<CompanionState | null> {
-		const file = this.file(sessionId);
-		if (!(await this.adapter.exists(file))) return null;
-		const value: unknown = JSON.parse(await this.adapter.read(file));
-		assertState(value, sessionId);
-		return value;
+		return (await this.slots(sessionId))[0]?.state ?? null;
+	}
+	private async persist(sessionId: string, state: CompanionState) {
+		const [latest] = await this.slots(sessionId);
+		const primary = this.file(sessionId);
+		const target = latest?.path === primary ? `${primary}.next` : primary;
+		const raw = latest
+			? JSON.stringify({ revision: latest.revision + 1, state })
+			: JSON.stringify(state);
+		await this.adapter.write(target, raw);
+		if ((await this.adapter.read(target)) !== raw)
+			throw new Error("Companion save could not be verified");
+	}
+	/** Only plugin-owned sidecars are enumerated, never the vault's notes. */
+	private async allSessionIds(): Promise<string[]> {
+		if (!(await this.adapter.exists(this.directory))) return [];
+		const { files } = await this.adapter.list(this.directory);
+		const ids = new Set<string>();
+		for (const file of files) {
+			const hex =
+				/(?:^|\/)v1-([0-9a-f]+)\.companion\.json(?:\.next)?$/.exec(
+					file,
+				)?.[1];
+			if (!hex) continue;
+			const bytes = Uint8Array.from(hex.match(/../g) ?? [], (char) =>
+				Number.parseInt(char, 16),
+			);
+			const id = new TextDecoder().decode(bytes);
+			if (filename(id) !== `v1-${hex}.companion.json`)
+				throw new Error("Invalid companion storage identity");
+			ids.add(id);
+		}
+		return [...ids];
+	}
+	async assertNoUnresolvedWrite(path: string): Promise<void> {
+		await this.enqueue(async () => {
+			for (const id of await this.allSessionIds()) {
+				const state = await this.read(id);
+				if (
+					state?.operations.some(
+						({ proposal, receipt }) =>
+							proposal.path.normalize("NFC").toLowerCase() ===
+								path.normalize("NFC").toLowerCase() &&
+							isUnresolved(receipt.status),
+					)
+				)
+					throw new Error(
+						"Reconcile the previous write to this note in its originating conversation first",
+					);
+			}
+		});
 	}
 	load(sessionId: string): Promise<CompanionState | null> {
 		return this.enqueue(() => this.read(sessionId));
@@ -204,10 +315,7 @@ export class CompanionStorage {
 			assertState(state, sessionId);
 			if (!(await this.adapter.exists(this.directory)))
 				await this.adapter.mkdir(this.directory);
-			await this.adapter.write(
-				this.file(sessionId),
-				JSON.stringify(state),
-			);
+			await this.persist(sessionId, state);
 			for (const listener of this.listeners) listener(state);
 			return state;
 		});
@@ -223,18 +331,25 @@ export class CompanionStorage {
 			const state = change(previous);
 			if (state === previous) return;
 			assertState(state, sessionId);
-			await this.adapter.write(
-				this.file(sessionId),
-				JSON.stringify(state),
-			);
+			await this.persist(sessionId, state);
 			for (const listener of this.listeners) listener(state);
 		});
 	}
 	remove(sessionId: string): Promise<void> {
 		return this.enqueue(async () => {
+			const state = await this.read(sessionId);
+			if (
+				state?.operations.some(({ receipt }) =>
+					isUnresolved(receipt.status),
+				)
+			)
+				throw new Error(
+					"Reconcile pending note writes before deleting this conversation",
+				);
 			const file = this.file(sessionId);
-			if (await this.adapter.exists(file))
-				await this.adapter.remove(file);
+			for (const slot of [file, `${file}.next`])
+				if (await this.adapter.exists(slot))
+					await this.adapter.remove(slot);
 			this.deleted.add(sessionId);
 		});
 	}

@@ -168,13 +168,19 @@ export class PermissionManager {
 	 * Resolves the pending Promise, updates UI, and activates the next
 	 * queued request if any.
 	 */
-	respond(requestId: string, optionId: string): void {
+	respond(requestId: string, optionId: string | null): void {
 		const request = this.pendingRequests.get(requestId);
 		if (!request) {
 			return;
 		}
 
 		const { resolve, toolCallId, options, sessionId } = request;
+		if (this.requestQueue[0]?.requestId !== requestId) return;
+		if (
+			optionId !== null &&
+			!options.some((option) => option.optionId === optionId)
+		)
+			return;
 
 		// Reflect the selection in the UI via session update
 		this.callbacks.onSessionUpdate({
@@ -184,16 +190,17 @@ export class PermissionManager {
 			permissionRequest: {
 				requestId,
 				options,
-				selectedOptionId: optionId,
+				selectedOptionId: optionId ?? undefined,
+				isCancelled: optionId === null,
 				isActive: false,
 			},
 		});
 
 		resolve({
-			outcome: {
-				outcome: "selected",
-				optionId,
-			},
+			outcome:
+				optionId === null
+					? { outcome: "cancelled" }
+					: { outcome: "selected", optionId },
 		});
 		this.pendingRequests.delete(requestId);
 		this.requestQueue = this.requestQueue.filter(

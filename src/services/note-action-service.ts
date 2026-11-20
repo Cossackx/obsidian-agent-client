@@ -18,6 +18,7 @@ export class NoteActionService {
 	) {}
 
 	private enqueue<T>(path: string, work: () => Promise<T>): Promise<T> {
+		path = path.normalize("NFC").toLowerCase();
 		const result = (this.queues.get(path) ?? Promise.resolve()).then(work);
 		const tail = result.then(
 			() => undefined,
@@ -99,18 +100,7 @@ export class NoteActionService {
 					);
 				return previous.receipt;
 			}
-			if (
-				history.some(
-					(row) =>
-						row.proposal.path === frozen.path &&
-						["pending", "unknown", "undo-pending"].includes(
-							row.receipt.status,
-						),
-				)
-			)
-				throw new Error(
-					"Reconcile the previous write to this note first",
-				);
+			await this.storage.assertNoUnresolvedWrite(frozen.path);
 			await this.record(sessionId, frozen, "pending");
 			let status: WriteReceipt["status"];
 			try {
@@ -178,6 +168,7 @@ export class NoteActionService {
 			// No atomic compare-and-delete API. Never trash a note on a stale read.
 			if (proposal.before === null)
 				throw new Error("Created notes must be removed manually");
+			await this.storage.assertNoUnresolvedWrite(proposal.path);
 			await this.record(sessionId, proposal, "undo-pending");
 			let status: WriteReceipt["status"];
 			try {

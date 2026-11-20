@@ -795,6 +795,13 @@ export class AcpClient {
 		);
 	}
 
+	getConfirmedSessionId(): string | null {
+		return this.confirmedSessionId &&
+			this.hasLiveSession(this.confirmedSessionId)
+			? this.confirmedSessionId
+			: null;
+	}
+
 	getSessionRestoreCapabilities(): { load: boolean; resume: boolean } {
 		return {
 			load:
@@ -889,7 +896,10 @@ export class AcpClient {
 	/**
 	 * Respond to a permission request from the agent.
 	 */
-	respondToPermission(requestId: string, optionId: string): Promise<void> {
+	respondToPermission(
+		requestId: string,
+		optionId: string | null,
+	): Promise<void> {
 		this.requireConnection();
 
 		this.logger.log(

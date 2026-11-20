@@ -1,3 +1,5 @@
+import { extractSelection } from "./utils/selection";
+import type { SourceSnapshot, TextRange } from "./types/note-companion";
 import {
 	Plugin,
 	WorkspaceLeaf,
@@ -285,6 +287,21 @@ export default class AgentClientPlugin extends Plugin {
 	/** Guards against concurrent embed-id injection for the same block. */
 	private embedIdInjectionInFlight = new Set<string>();
 
+	private selectionHandlers = new Map<
+		string,
+		(source: SourceSnapshot, range: TextRange) => Promise<void>
+	>();
+	registerCompanionSelection(
+		viewId: string,
+		handler: (source: SourceSnapshot, range: TextRange) => Promise<void>,
+	): () => void {
+		this.selectionHandlers.set(viewId, handler);
+		return () => {
+			if (this.selectionHandlers.get(viewId) === handler)
+				this.selectionHandlers.delete(viewId);
+		};
+	}
+
 	async onload() {
 		await this.loadSettings();
 
@@ -370,6 +387,44 @@ export default class AgentClientPlugin extends Plugin {
 			},
 		);
 		ribbonIconEl.addClass("agent-client-ribbon-icon");
+
+		this.addCommand({
+			id: "companion-add-selection",
+			name: "Add selection to note companion",
+			editorCallback: (editor, view) => {
+				if (!view.file || !editor.somethingSelected()) {
+					new Notice(
+						"Select text in a Markdown source editor first.",
+					);
+					return;
+				}
+				const id = this.viewRegistry.getFocusedId();
+				const act = id ? this.selectionHandlers.get(id) : undefined;
+				if (!act) {
+					new Notice(
+						"Open and focus the target Agent Client conversation first.",
+					);
+					return;
+				}
+				const text = editor.getValue();
+				const { range } = extractSelection(
+					text,
+					editor.getCursor("from"),
+					editor.getCursor("to"),
+				);
+				void act(
+					{ path: view.file.path, text, capturedAt: Date.now() },
+					range,
+				).catch(
+					(error: unknown) =>
+						new Notice(
+							error instanceof Error
+								? error.message
+								: "Could not stage the selection",
+						),
+				);
+			},
+		});
 
 		this.addCommand({
 			id: "open-chat-view",

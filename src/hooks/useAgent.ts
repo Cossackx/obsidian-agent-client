@@ -60,7 +60,7 @@ export interface UseAgentReturn {
 		overrideCwd?: string,
 	) => Promise<void>;
 	closeSession: () => Promise<void>;
-	forceRestartAgent: () => Promise<void>;
+	forceRestartAgent: (restoreId?: string, cwd?: string) => Promise<void>;
 	cancelOperation: () => Promise<void>;
 	getAvailableAgents: () => AgentDisplayInfo[];
 	updateSessionFromLoad: (

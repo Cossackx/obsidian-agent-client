@@ -39,6 +39,12 @@ const directory = "fixture-config/plugins/agent-client/sessions";
 function fixture() {
 	const files = new Map<string, string>();
 	const adapter = {
+		list: vi.fn(async (path: string) => ({
+			files: [...files.keys()].filter((name) =>
+				name.startsWith(`${path}/`),
+			),
+			folders: [],
+		})),
 		exists: vi.fn(async (path: string) => files.has(path)),
 		read: vi.fn(async (path: string) => files.get(path)!),
 		write: vi.fn(async (path: string, data: string) => {
@@ -239,7 +245,7 @@ it("uses exact heading occurrence, preserves preimage line endings and rejects i
 	).toThrow();
 });
 function actionsFixture() {
-	const { storage, adapter } = fixture();
+	const { storage, adapter, files } = fixture();
 	const note = new TFile(path, "Fixture");
 	let text = before;
 	const vault = {
@@ -259,6 +265,12 @@ function actionsFixture() {
 		adapter,
 		vault,
 		service: new NoteActionService(vault, storage),
+		files,
+		restart: () =>
+			new NoteActionService(
+				vault,
+				new CompanionStorage(adapter, directory),
+			),
 		text: () => text,
 		edit: (next: string) => {
 			text = next;
@@ -415,7 +427,7 @@ it("rename updates exact note associations; comparison uses only the saved sent 
 			text: "after",
 			capturedAt: 2,
 		}),
-	).toEqual({ changed: true, before: "bef", after: "after" });
+	).toEqual({ changed: true, before: "bef", after: "aft", truncated: true });
 });
 it("history_is_not_connection; authorization prompts and failures are distinct", () => {
 	const state = {
@@ -439,3 +451,44 @@ it("history_is_not_connection; authorization prompts and failures are distinct",
 function matching(fields: Record<string, unknown>): unknown {
 	return expect.objectContaining(fields) as unknown;
 }
+
+it("blocks a different conversation after restart while an apply is unresolved", async () => {
+	const { service, restart, vault } = actionsFixture();
+	const first = proposal();
+	vault.read.mockRejectedValueOnce(new Error("Lost first readback"));
+	expect((await service.apply("a", first)).status).toBe("unknown");
+	const second = {
+		...first,
+		id: "new-operation",
+		before: first.after,
+		after: first.after + "Second\r\n",
+	};
+	await expect(restart().apply("b", second)).rejects.toThrow(/reconcile/i);
+	expect(vault.process).toHaveBeenCalledTimes(1);
+	expect((await restart().reconcile("a", first.id)).status).toBe("verified");
+	expect((await restart().apply("b", second)).status).toBe("verified");
+});
+it("recovers an intact pending receipt when the final save tears after changing the note", async () => {
+	const { service, restart, adapter, files, text, vault } = actionsFixture();
+	const first = proposal();
+	adapter.write.mockImplementationOnce(async (key, value) => {
+		files.set(key, value);
+	});
+	adapter.write.mockImplementationOnce(async (key) => {
+		files.set(key, "{");
+		throw new Error("Short write");
+	});
+	await expect(service.apply("a", first)).rejects.toThrow("Short write");
+	expect(text()).toBe(first.after);
+	expect((await restart().reconcile("a", first.id)).status).toBe("verified");
+	expect(vault.process).toHaveBeenCalledTimes(1);
+});
+it("makes no note mutation if the pending journal tears", async () => {
+	const { service, adapter, files, vault } = actionsFixture();
+	adapter.write.mockImplementationOnce(async (key) => {
+		files.set(key, "{");
+		throw new Error("Short write");
+	});
+	await expect(service.apply("a", proposal())).rejects.toThrow("Short write");
+	expect(vault.process).not.toHaveBeenCalled();
+});

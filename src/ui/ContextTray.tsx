@@ -1,3 +1,5 @@
+import { MarkdownView } from "obsidian";
+import { describeScope } from "../services/source-comparison";
 import * as React from "react";
 import { Modal, Notice, TFile, type App } from "obsidian";
 import type {
@@ -26,7 +28,6 @@ import {
 } from "../services/capture-proposal";
 import {
 	createRevisionProposal,
-	parseStructuredReply,
 	passagePrompt,
 	validatePassageRevisions,
 } from "../services/passage-review";
@@ -36,12 +37,20 @@ import {
 } from "../services/synthesis-request";
 import { NoteActionModal } from "./NoteActionModal";
 import { useChatContext } from "./ChatContext";
+import { mapStoredRange } from "../utils/selection";
 import { getVaultDragFiles } from "../utils/vault-drag";
 
 export interface StructuredTurn {
 	text: string;
+	intent?: string;
+	quotes?: readonly {
+		label: string;
+		text: string;
+		limit: "note" | "selection";
+	}[];
 	items?: readonly ContextItem[];
-	onReply?: (reply: string, id: string) => void;
+	onReply?: (result: unknown, id: string) => void;
+	afterReply?: (id: string) => void;
 }
 
 function ReceiptDetails({ proposal }: { proposal: NoteEditProposal }) {
@@ -142,10 +151,10 @@ export function ContextTray({
 		end: number;
 	} | null>(null);
 	const [createPath, setCreatePath] = React.useState("");
-	const [compact, setCompact] = React.useState(false);
+	const compact = state?.compact ?? false;
 	const [synthesis, setSynthesis] = React.useState<{
 		id: string;
-		paths: string[];
+		sources: ContextItem[];
 	} | null>(null);
 	const [template, setTemplate] = React.useState<SourceSnapshot | null>(null);
 	const [purpose, setPurpose] = React.useState<SynthesisPurpose>("synthesis");
@@ -206,20 +215,50 @@ export function ContextTray({
 		if (current.current === sessionId)
 			await update((old) => entries.reduce(putItem, old));
 	};
+	const favourites = state?.favourites ?? [];
+	const projectActions = [
+		[
+			"Brief me",
+			"Brief me on the selected project sources. Separate current state, decisions and next actions.",
+		],
+		[
+			"Challenge this plan",
+			"Challenge this plan using the selected sources. Identify assumptions, failure points and alternatives.",
+		],
+		[
+			"Where were we?",
+			"Recap this conversation: decisions, open issues and next actions. This recap is not the source of truth.",
+		],
+	] as const;
+	const projectButton = ([label, text]: (typeof projectActions)[number]) => (
+		<button
+			key={label}
+			type="button"
+			disabled={!canSend || working || busy}
+			onClick={() =>
+				run(() =>
+					send({
+						text: `${text} Do not invoke tools or edit files.`,
+						intent: label,
+					}),
+				)
+			}
+		>
+			{label}
+		</button>
+	);
 	const synthesize = async () => {
 		if (!state || !sessionId) return;
-		const paths = [
-			...new Set(
-				state.items
-					.filter((item) => item.role !== "destination")
-					.map((item) => item.source.path),
-			),
-		];
+		const sources = state.items.filter(
+			(item) => item.role !== "destination",
+		);
+		setSynthesis(null);
 		await send({
-			text: buildSynthesisPrompt(state.items, purpose),
-			onReply: () => {
+			text: buildSynthesisPrompt(sources, purpose),
+			intent: `Bring these together: ${purpose}`,
+			afterReply: (id) => {
 				if (current.current === sessionId)
-					setSynthesis({ id: sessionId, paths });
+					setSynthesis({ id, sources });
 			},
 		});
 	};
@@ -284,22 +323,24 @@ export function ContextTray({
 	const destination = async (kind: "note" | "range") => {
 		let target: DestinationAnchor;
 		if (kind === "range") {
-			const capture = await vaultService.captureActiveSelection();
+			const capture = await vaultService.captureActiveSelection(true);
 			if (!capture)
 				throw new Error(
-					"Select text in a source editor to set the placement range.",
+					"Place the caret or select text in a source editor first.",
 				);
 			const saved = await read(capture.path);
-			if (saved.text !== capture.text)
-				throw new Error(
-					"The open buffer differs from the stored note. Save or reselect it before placing a reply.",
-				);
+			const range = mapStoredRange(
+				capture.text,
+				saved.text,
+				capture.range,
+			);
+			if (current.current !== sessionId) return;
 			frozenTarget.current = {
-				source: capture,
+				source: saved,
 				anchor: {
 					kind: "range",
 					path: capture.path,
-					range: capture.range,
+					range,
 				},
 			};
 			target = frozenTarget.current.anchor;
@@ -414,32 +455,33 @@ export function ContextTray({
 			throw new Error(
 				"A passage exceeds the configured selection limit; capture a smaller excerpt.",
 			);
+		setProposals(null);
 		await send({
 			text: passagePrompt,
+			intent: "Review captured passages",
 			items,
 			onReply: (text, id) => {
 				if (current.current !== sessionId) return;
 				try {
-					const rows = validatePassageRevisions(
-						parseStructuredReply(text),
-						items,
-					).flatMap((revision) => {
-						const item = items.find(
-							(row) => row.id === revision.itemId,
-						);
-						return item
-							? [
-									{
-										proposal: createRevisionProposal(
-											revision,
-											item,
-											id,
-										),
-										comment: revision.comment,
-									},
-								]
-							: [];
-					});
+					const rows = validatePassageRevisions(text, items).flatMap(
+						(revision) => {
+							const item = items.find(
+								(row) => row.id === revision.itemId,
+							);
+							return item
+								? [
+										{
+											proposal: createRevisionProposal(
+												revision,
+												item,
+												id,
+											),
+											comment: revision.comment,
+										},
+									]
+								: [];
+						},
+					);
 					setProposals({ sessionId, rows });
 				} catch {
 					setMessage(
@@ -478,19 +520,48 @@ export function ContextTray({
 							row.occurrence === target.occurrence,
 					)
 				: null;
+		if (
+			section &&
+			section.range.end - section.bodyStart >
+				plugin.settings.displaySettings.maxSelectionLength
+		)
+			throw new Error(
+				"The destination section exceeds the selection limit. Use literal placement or select a smaller section; a partial section cannot be replaced.",
+			);
 		if (original && !section)
 			throw new Error(
 				"The captured destination heading no longer exists.",
 			);
-		const text = `${buildCapturePrompt(intent, reply.id, target)}\n${JSON.stringify({ reply: literal, template: intent === "new-note" && template ? { path: template.path, text: template.text.slice(0, 10000) } : undefined, section: section && original?.text.slice(section.bodyStart, section.range.end) })}`;
+		const quotes: NonNullable<StructuredTurn["quotes"]>[number][] = [
+			{
+				label: "Selected assistant reply",
+				text: literal,
+				limit: "selection",
+			},
+		];
+		if (intent === "new-note" && template)
+			quotes.push({
+				label: `Template: ${template.path}`,
+				text: template.text,
+				limit: "note",
+			});
+		if (section && original)
+			quotes.push({
+				label: `Approved destination section: ${target.path}`,
+				text: original.text.slice(section.bodyStart, section.range.end),
+				limit: "selection",
+			});
+		if (current.current !== sessionId) return;
 		await send({
-			text,
+			text: buildCapturePrompt(intent, reply.id, target),
+			intent: `Request editorial proposal (${intent}) for ${target.path}`,
+			quotes,
 			onReply: (result) => {
 				if (current.current !== sessionId) return;
 				try {
 					preview(
 						validateCaptureProposal(
-							parseStructuredReply(result),
+							result,
 							intent,
 							target,
 							original,
@@ -563,23 +634,30 @@ export function ContextTray({
 				Note companion
 				{state?.items.length ? ` · ${state.items.length} attached` : ""}
 			</summary>
-			{companion.warning && (
-				<p role="alert" className="xo-note-warning">
-					{companion.warning}{" "}
-					<button
-						type="button"
-						onClick={() => run(() => companion.retry())}
-					>
-						Retry save or load
-					</button>
-				</p>
-			)}
 			{message && <p role="status">{message}</p>}
+			{favourites.length > 0 && (
+				<div
+					className="xo-note-row"
+					aria-label="Favourite project actions"
+				>
+					{projectActions
+						.filter(([label]) => favourites.includes(label))
+						.map(projectButton)}
+				</div>
+			)}
 			<div className="xo-note-row">
 				<button
 					type="button"
 					aria-pressed={compact}
-					onClick={() => setCompact(!compact)}
+					disabled={!state}
+					onClick={() =>
+						run(() =>
+							update((old) => ({
+								...old,
+								compact: !old.compact,
+							})),
+						)
+					}
 				>
 					Compact tray
 				</button>
@@ -810,78 +888,158 @@ export function ContextTray({
 							Bring these together
 						</button>
 					</div>
-					{synthesis && synthesis.id === sessionId && (
-						<div className="xo-note-chip">
-							<strong>Synthesis · not fact-verified</strong>
-							<p>Supplied sources:</p>
-							{synthesis.paths.map((path) => (
-								<button
-									key={path}
-									type="button"
-									onClick={() =>
-										run(async () => {
-											const file =
-												app.vault.getFileByPath(path);
-											if (!file || file.path !== path)
-												throw new Error(
-													"The exact source is no longer at this path",
+					{synthesis &&
+						replies.some(
+							(candidate) => candidate.id === synthesis.id,
+						) && (
+							<div className="xo-note-chip">
+								<strong>Synthesis · not fact-verified</strong>
+								<p>Supplied sources:</p>
+								<small>
+									Sources supplied for reply {synthesis.id}
+								</small>
+								{synthesis.sources.map((item) => (
+									<button
+										key={item.id}
+										type="button"
+										onClick={() =>
+											run(async () => {
+												const file =
+													app.vault.getFileByPath(
+														item.source.path,
+													);
+												if (
+													!file ||
+													file.path !==
+														item.source.path
+												)
+													throw new Error(
+														"The exact source is no longer at this path",
+													);
+												const scope = item.scope;
+												const text =
+													await app.vault.read(file);
+												const range =
+													scope.kind === "heading"
+														? headingRanges(
+																text,
+															).find(
+																(row) =>
+																	row.heading ===
+																		scope.heading &&
+																	row.occurrence ===
+																		scope.occurrence,
+															)?.range
+														: scope.kind ===
+																	"passage" &&
+															  text.slice(
+																	scope.range
+																		.start,
+																	scope.range
+																		.end,
+															  ) ===
+																	contextText(
+																		item,
+																	)
+															? scope.range
+															: null;
+												if (
+													scope.kind !== "note" &&
+													!range
+												)
+													throw new Error(
+														"This excerpt moved or changed; inspect the captured bytes before navigating.",
+													);
+												if (
+													current.current !==
+													sessionId
+												)
+													return;
+												const leaf =
+													app.workspace.getLeaf(
+														"tab",
+													);
+												await leaf.openFile(
+													file,
+													range
+														? {
+																state: {
+																	mode: "source",
+																},
+															}
+														: undefined,
 												);
-											await app.workspace
-												.getLeaf("tab")
-												.openFile(file);
-										})
-									}
-								>
-									{path}
-								</button>
-							))}
-						</div>
-					)}
+												if (
+													range &&
+													leaf.view instanceof
+														MarkdownView
+												) {
+													const editor =
+														leaf.view.editor;
+													const offsets =
+														mapStoredRange(
+															text,
+															editor.getValue(),
+															range,
+														);
+													const from =
+															editor.offsetToPos(
+																offsets.start,
+															),
+														to = editor.offsetToPos(
+															offsets.end,
+														);
+													editor.setSelection(
+														from,
+														to,
+													);
+													editor.scrollIntoView(
+														{ from, to },
+														true,
+													);
+												}
+											})
+										}
+									>
+										{item.source.path} ·{" "}
+										{describeScope(item.scope)}
+									</button>
+								))}
+							</div>
+						)}
 					<details>
 						<summary>Project actions</summary>
 						<div className="xo-note-row">
-							{(
-								[
-									[
-										"Brief me",
-										"Brief me on the selected project sources. Separate current state, decisions and next actions.",
-									],
-									[
-										"Challenge this plan",
-										"Challenge this plan using the selected sources. Identify assumptions, failure points and alternatives.",
-									],
-									[
-										"Where were we?",
-										"Generate a recap of this conversation: decisions, open issues and next actions. This recap is not the source of truth.",
-									],
-								] as const
-							).map(([label, text]) => (
-								<button
-									key={label}
-									type="button"
-									disabled={!canSend || working || busy}
-									onClick={() =>
-										run(() =>
-											send({
-												text:
-													text +
-													" Do not invoke tools or edit files.",
-												onReply: () => {
-													if (
-														current.current ===
-														sessionId
-													)
-														setMessage(
-															label +
-																": generated response, not independently verified.",
-														);
-												},
-											}),
-										)
-									}
-								>
-									{label}
-								</button>
+							{projectActions.map(projectButton)}
+							{projectActions.map(([label]) => (
+								<label key={label}>
+									<input
+										type="checkbox"
+										checked={favourites.includes(label)}
+										disabled={busy || working}
+										onChange={() =>
+											run(() =>
+												update((old) => ({
+													...old,
+													favourites:
+														favourites.includes(
+															label,
+														)
+															? favourites.filter(
+																	(entry) =>
+																		entry !==
+																		label,
+																)
+															: [
+																	...favourites,
+																	label,
+																],
+												})),
+											)
+										}
+									/>{" "}
+									Favourite: {label}
+								</label>
 							))}
 							<button
 								type="button"

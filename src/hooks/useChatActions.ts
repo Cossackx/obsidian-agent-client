@@ -5,7 +5,7 @@
  * config changes, and related UI state (restoredMessage, agentUpdateNotification).
  */
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import { Notice, Platform } from "obsidian";
 
 import type AgentClientPlugin from "../plugin";
@@ -32,12 +32,18 @@ import { convertWindowsPathToWsl } from "../utils/platform";
 
 export interface UseChatActionsReturn {
 	// Message actions
+	unsavedIndex: string | null;
+	retryIndex: () => Promise<void>;
 	handleSendMessage: (
 		content: string,
 		attachments?: AttachedFile[],
 		companion?: Pick<
 			import("./useAgentMessages").SendMessageOptions,
-			"preparedContext" | "approvePayload" | "onConfirmed"
+			| "preparedContext"
+			| "approvePayload"
+			| "onConfirmed"
+			| "generatedInstruction"
+			| "collectStructuredReply"
 		>,
 	) => Promise<boolean>;
 	handleStopGeneration: () => Promise<void>;
@@ -86,6 +92,21 @@ export function useChatActions(
 	persistentEmbedId?: string,
 ): UseChatActionsReturn {
 	const logger = getLogger();
+	const pendingIndex = useRef(new Map<string, () => Promise<void>>());
+	const [unsavedIndex, setUnsavedIndex] = useState<string | null>(null);
+	const retryIndex = useCallback(async () => {
+		const id = unsavedIndex;
+		if (!id) return;
+		try {
+			await pendingIndex.current.get(id)?.();
+			pendingIndex.current.delete(id);
+			setUnsavedIndex((old) => (old === id ? null : old));
+		} catch {
+			new Notice(
+				"Conversation history still could not be indexed. The prompt was not resent.",
+			);
+		}
+	}, [unsavedIndex]);
 
 	// ============================================================
 	// State (moved from ChatPanel)
@@ -150,7 +171,11 @@ export function useChatActions(
 			attachments?: AttachedFile[],
 			companion?: Pick<
 				import("./useAgentMessages").SendMessageOptions,
-				"preparedContext" | "approvePayload" | "onConfirmed"
+				| "preparedContext"
+				| "approvePayload"
+				| "onConfirmed"
+				| "generatedInstruction"
+				| "collectStructuredReply"
 			>,
 		) => {
 			// Dismiss overlays on send
@@ -193,9 +218,9 @@ export function useChatActions(
 			let confirmed = false;
 			await agent.sendMessage(content, {
 				...companion,
-				onConfirmed: (reply, id) => {
+				onConfirmed: (reply, id, assistantId, sources) => {
 					confirmed = true;
-					companion?.onConfirmed?.(reply, id);
+					companion?.onConfirmed?.(reply, id, assistantId, sources);
 				},
 				activeNote: suggestions.mentions.activeNote,
 				vaultBasePath: vaultPath,
@@ -207,26 +232,42 @@ export function useChatActions(
 				isFirstMessage,
 			});
 
-			// Save session metadata locally on first message
+			const id = session.sessionId;
 			if (
-				isFirstMessage &&
-				session.sessionId &&
-				(!companion || confirmed)
+				confirmed &&
+				id &&
+				(pendingIndex.current.has(id) ||
+					!plugin.settingsService
+						.getSavedSessions()
+						.some((saved) => saved.sessionId === id))
 			) {
-				await sessionHistory.saveSessionLocally(
-					session.sessionId,
-					content,
-					persistentEmbedId,
-				);
-				logger.log(
-					`[ChatPanel] Session saved locally: ${session.sessionId}`,
-				);
+				const store =
+					pendingIndex.current.get(id) ??
+					(() =>
+						sessionHistory.saveSessionLocally(
+							id,
+							content,
+							persistentEmbedId,
+						));
+				try {
+					await store();
+					pendingIndex.current.delete(id);
+					setUnsavedIndex((old) => (old === id ? null : old));
+				} catch {
+					pendingIndex.current.set(id, store);
+					setUnsavedIndex(id);
+					new Notice(
+						"Turn sent. The local history index could not be saved; retry only the index.",
+					);
+				}
 			}
 			return confirmed;
 		},
 		[
 			agent.clearError,
 			agent.sendMessage,
+			plugin,
+			setUnsavedIndex,
 			messages.length,
 			session.sessionId,
 			sessionHistory.saveSessionLocally,
@@ -254,7 +295,12 @@ export function useChatActions(
 				requestedAgentId && requestedAgentId !== session.agentId;
 
 			// Skip if already empty AND not switching agents
-			if (messages.length === 0 && !isAgentSwitch) {
+			if (
+				messages.length === 0 &&
+				!isAgentSwitch &&
+				session.sessionId &&
+				agent.isReady
+			) {
 				new Notice("[Agent Client] Already a new session");
 				return;
 			}
@@ -397,6 +443,8 @@ export function useChatActions(
 	// ============================================================
 
 	return {
+		unsavedIndex,
+		retryIndex,
 		handleSendMessage,
 		handleStopGeneration,
 		handleNewChat,

@@ -15,6 +15,18 @@ export function parseStructuredReply(text: string): unknown {
 	const fence = /^```(?:json)?[\t ]*\r?\n([\s\S]*)\r?\n```$/i.exec(trimmed);
 	return JSON.parse(fence ? fence[1] : trimmed) as unknown;
 }
+export function readCorrelatedReply(text: string, requestId: string): unknown {
+	const payload = parseStructuredReply(text);
+	if (
+		!payload ||
+		typeof payload !== "object" ||
+		!("requestId" in payload) ||
+		payload.requestId !== requestId ||
+		!("result" in payload)
+	)
+		throw new Error("This response did not identify the current request");
+	return payload.result;
+}
 export function validatePassageRevisions(
 	value: unknown,
 	items: readonly ContextItem[],

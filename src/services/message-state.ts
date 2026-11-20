@@ -428,17 +428,12 @@ export function findActivePermission(
 export function selectOption(
 	options: PermissionOption[],
 	preferredKinds: PermissionOption["kind"][],
-	fallback?: (option: PermissionOption) => boolean,
 ): PermissionOption | undefined {
 	for (const kind of preferredKinds) {
 		const match = options.find((opt) => opt.kind === kind);
 		if (match) return match;
 	}
-	if (fallback) {
-		const fallbackOption = options.find(fallback);
-		if (fallbackOption) return fallbackOption;
-	}
-	return options[0];
+	return undefined;
 }
 
 // ============================================================================
