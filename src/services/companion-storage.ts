@@ -89,6 +89,8 @@ function assertState(
 		value.sessionId !== id ||
 		!str(value.draft) ||
 		(value.compact !== undefined && typeof value.compact !== "boolean") ||
+		(value.followDismissed !== undefined &&
+			typeof value.followDismissed !== "boolean") ||
 		(value.favourites !== undefined &&
 			(!Array.isArray(value.favourites) ||
 				!value.favourites.every(str))) ||

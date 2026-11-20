@@ -1,3 +1,4 @@
+import type { ContextItem } from "../types/note-companion";
 export function deriveCompanionStatus(input: {
 	connected: boolean;
 	busy: boolean;
@@ -23,3 +24,58 @@ export const companionStatusLabel = {
 	working: "Working",
 	connected: "Connected",
 } as const;
+
+export interface ComposerChip {
+	key: string;
+	kind: "following" | "item";
+	path: string;
+	/** Short honest scope: what the next send carries for this chip. */
+	scope: string;
+	itemId?: string;
+	pinned: boolean;
+	status?: string;
+}
+
+/**
+ * One visible representation per active note: an explicit item for the
+ * active path replaces the follow chip, and a dismissed follow stays off
+ * for this conversation whatever note becomes active.
+ */
+export function composerChips(input: {
+	items: readonly ContextItem[];
+	activePath?: string;
+	activeSelection?: { fromLine: number; toLine: number };
+	followDismissed: boolean;
+}): { chips: ComposerChip[]; following: boolean } {
+	const chips: ComposerChip[] = input.items
+		.filter((item) => item.role !== "destination")
+		.map((item) => ({
+			key: item.id,
+			kind: "item",
+			path: item.source.path,
+			itemId: item.id,
+			pinned: item.lifetime === "session",
+			status: item.status,
+			scope:
+				item.scope.kind === "note"
+					? `whole note · ${item.role}`
+					: item.scope.kind === "heading"
+						? `heading “${item.scope.heading}” · ${item.role}`
+						: `selected passage · ${item.role}`,
+		}));
+	const following =
+		!!input.activePath &&
+		!input.followDismissed &&
+		!input.items.some((item) => item.source.path === input.activePath);
+	if (following && input.activePath)
+		chips.unshift({
+			key: "following",
+			kind: "following",
+			path: input.activePath,
+			pinned: false,
+			scope: input.activeSelection
+				? `following · lines ${input.activeSelection.fromLine}-${input.activeSelection.toLine}`
+				: "following active note",
+		});
+	return { chips, following };
+}

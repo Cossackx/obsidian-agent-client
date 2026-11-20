@@ -1,4 +1,9 @@
-import type { CompanionState, ContextItem } from "../types/note-companion";
+import type {
+	CompanionState,
+	ContextItem,
+	SourceSnapshot,
+} from "../types/note-companion";
+import { headingRanges } from "./context-builder";
 
 export function emptyCompanion(sessionId: string): CompanionState {
 	return {
@@ -54,4 +59,25 @@ export function moveItem(
 	if (index < 0 || next < 0 || next >= items.length) return state;
 	[items[index], items[next]] = [items[next], items[index]];
 	return { ...state, items };
+}
+
+/** Re-captures an item from fresh note bytes; passages must be re-selected. */
+export function refreshItem(
+	item: ContextItem,
+	source: SourceSnapshot,
+): Pick<ContextItem, "source" | "scope" | "status"> {
+	let scope = item.scope;
+	if (scope.kind === "passage")
+		throw new Error("Capture a changed passage again from the editor.");
+	if (scope.kind === "heading") {
+		const old = scope;
+		const row = headingRanges(source.text).find(
+			(entry) =>
+				entry.heading === old.heading &&
+				entry.occurrence === old.occurrence,
+		);
+		if (!row) throw new Error("The heading no longer exists.");
+		scope = { kind: "heading", ...row };
+	}
+	return { source, scope, status: undefined };
 }

@@ -258,6 +258,8 @@ export interface MessageBubbleProps {
 	expandedToolCalls?: ReadonlySet<string>;
 	/** Toggle a tool call body */
 	onToggleToolCall?: (toolCallId: string) => void;
+	/** Opens Insert/Review bound to this exact reply. */
+	onUseReply?: (messageId: string) => void;
 }
 
 /**
@@ -353,6 +355,7 @@ export const MessageBubble = React.memo(function MessageBubble({
 	terminalClient,
 	expandedToolCalls,
 	onToggleToolCall,
+	onUseReply,
 }: MessageBubbleProps) {
 	// A plan-only message (plan followed by a tool call) would render as an
 	// empty shell — the strip under the header owns plan display.
@@ -413,6 +416,17 @@ export const MessageBubble = React.memo(function MessageBubble({
 			) && (
 				<div className="agent-client-message-actions">
 					<CopyButton contents={message.content} />
+					{onUseReply && message.role === "assistant" && (
+						<button
+							type="button"
+							className="agent-client-message-action-button"
+							aria-label="Insert or review this reply in a note"
+							title="Insert or review this reply in a note"
+							onClick={() => onUseReply(message.id)}
+						>
+							Use in note…
+						</button>
+					)}
 				</div>
 			)}
 		</div>

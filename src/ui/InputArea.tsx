@@ -212,6 +212,8 @@ export interface InputAreaProps {
 	) => Promise<void>;
 	/** Whether auto-mention setting is enabled */
 	autoMentionEnabled: boolean;
+	/** Composer context row; replaces the legacy auto-mention badge. */
+	contextRow?: React.ReactNode;
 	/** Input suggestions (mentions + slash commands) */
 	suggestions: UseSuggestionsReturn;
 	/** Plugin instance */
@@ -286,6 +288,7 @@ export function InputArea({
 	queuedPermissionCount = 0,
 	onApprovePermission,
 	autoMentionEnabled,
+	contextRow,
 	suggestions,
 	plugin,
 	view,
@@ -1131,8 +1134,9 @@ export function InputArea({
 				onDragLeave={handleDragLeave}
 				onDrop={(e) => void handleDrop(e)}
 			>
-				{/* Auto-mention Badge */}
-				{mentions.activeNote && (
+				{contextRow}
+				{/* Auto-mention Badge (only without a context row) */}
+				{!contextRow && mentions.activeNote && (
 					<button
 						className="agent-client-auto-mention-inline"
 						onClick={() =>

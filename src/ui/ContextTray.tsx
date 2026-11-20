@@ -11,7 +11,7 @@ import type {
 } from "../types/note-companion";
 import type { useNoteCompanion } from "../hooks/useNoteCompanion";
 import type { ChatMessage } from "../types/chat";
-import { moveItem, putItem } from "../services/companion-state";
+import { moveItem, putItem, refreshItem } from "../services/companion-state";
 import {
 	contextText,
 	headingRanges,
@@ -109,8 +109,8 @@ export function ContextTray({
 	busy,
 	send,
 	openContinuity,
-	activePath,
-	previewNext,
+	boundReplyId,
+	onClose,
 }: {
 	companion: ReturnType<typeof useNoteCompanion>;
 	messages: ChatMessage[];
@@ -118,8 +118,9 @@ export function ContextTray({
 	busy: boolean;
 	send: (turn: StructuredTurn) => Promise<boolean>;
 	openContinuity: () => Promise<void>;
-	activePath?: string;
-	previewNext: () => Promise<boolean>;
+	/** Reply chosen from its own bubble; never re-resolved to "latest". */
+	boundReplyId?: string | null;
+	onClose: () => void;
 }) {
 	const { plugin, vaultService } = useChatContext();
 	const { app } = plugin;
@@ -140,14 +141,13 @@ export function ContextTray({
 		sessionId: string;
 		rows: { proposal: NoteEditProposal; comment?: string }[];
 	} | null>(null);
-	const [replyId, setReplyId] = React.useState("");
+	const [replyId, setReplyId] = React.useState(boundReplyId ?? "");
 	const [excerpt, setExcerpt] = React.useState<{
 		messageId: string;
 		start: number;
 		end: number;
 	} | null>(null);
 	const [createPath, setCreatePath] = React.useState("");
-	const compact = state?.compact ?? false;
 	const [synthesis, setSynthesis] = React.useState<{
 		id: string;
 		sources: ContextItem[];
@@ -159,9 +159,15 @@ export function ContextTray({
 			row.role === "assistant" &&
 			row.content.some((c) => c.type === "text"),
 	);
-	const reply =
-		replies.find((row) => row.id === replyId) ??
-		replies[replies.length - 1];
+	React.useEffect(() => {
+		if (boundReplyId) {
+			setReplyId(boundReplyId);
+			setExcerpt(null);
+		}
+	}, [boundReplyId]);
+	const reply = replyId
+		? replies.find((row) => row.id === replyId)
+		: replies[replies.length - 1];
 	const fullReply =
 		reply?.content
 			.flatMap((c) => (c.type === "text" ? [c.text] : []))
@@ -614,32 +620,14 @@ export function ContextTray({
 		});
 	};
 	const refresh = async (item: ContextItem) => {
-		const source = await read(item.source.path);
-		let scope = item.scope;
-		if (scope.kind === "passage")
-			throw new Error("Capture a changed passage again from the editor.");
-		if (scope.kind === "heading") {
-			const old = scope;
-			const row = headingRanges(source.text).find(
-				(entry) =>
-					entry.heading === old.heading &&
-					entry.occurrence === old.occurrence,
-			);
-			if (!row) throw new Error("The heading no longer exists.");
-			scope = { kind: "heading", ...row };
-		}
+		const change = refreshItem(item, await read(item.source.path));
 		if (current.current === sessionId)
-			await editItem(item.id, "capture", {
-				source,
-				scope,
-				status: undefined,
-			});
+			await editItem(item.id, "capture", change);
 	};
 	return (
-		<details
-			className={
-				compact ? "xo-note-tray xo-note-compact" : "xo-note-tray"
-			}
+		<section
+			className="xo-note-tray"
+			aria-label="Note tools"
 			onDragOver={(event) => {
 				if (!busy && state && getVaultDragFiles(app)?.notes.length)
 					event.preventDefault();
@@ -658,10 +646,23 @@ export function ContextTray({
 				);
 			}}
 		>
-			<summary>
-				Note companion
-				{state?.items.length ? ` · ${state.items.length} attached` : ""}
-			</summary>
+			<div className="xo-note-row xo-note-tools-head">
+				<strong>Note tools</strong>
+				<button
+					type="button"
+					disabled={working || busy}
+					onClick={() => run(openContinuity)}
+				>
+					Note conversations
+				</button>
+				<button
+					type="button"
+					aria-label="Close note tools"
+					onClick={onClose}
+				>
+					Close
+				</button>
+			</div>
 			{message && <p role="status">{message}</p>}
 			{favourites.length > 0 && (
 				<div
@@ -673,55 +674,6 @@ export function ContextTray({
 						.map(projectButton)}
 				</div>
 			)}
-			<div className="xo-note-row">
-				<button
-					type="button"
-					aria-pressed={compact}
-					disabled={!state}
-					onClick={() =>
-						run(() =>
-							update(
-								(old) => ({ ...old, compact: !compact }),
-								"density",
-							),
-						)
-					}
-				>
-					Compact tray
-				</button>
-				<button
-					type="button"
-					disabled={!canSend || busy || working}
-					onClick={() => run(previewNext)}
-				>
-					Preview next send
-				</button>
-			</div>
-			{state && activePath && (
-				<p>
-					Following active note: {activePath}{" "}
-					<button
-						type="button"
-						disabled={working || busy}
-						onClick={() =>
-							run(() =>
-								addPaths([activePath], "working", "session"),
-							)
-						}
-					>
-						Pin working note
-					</button>
-				</p>
-			)}
-			<div className="xo-note-row">
-				<button
-					type="button"
-					disabled={working || busy}
-					onClick={() => run(openContinuity)}
-				>
-					Note conversations
-				</button>
-			</div>
 			{!state ? (
 				<small>
 					Companion storage is not ready for this conversation.
@@ -1412,6 +1364,6 @@ export function ContextTray({
 					)}
 				</>
 			)}
-		</details>
+		</section>
 	);
 }

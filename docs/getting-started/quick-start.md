@@ -51,7 +51,7 @@ The chat panel opens in the right sidebar. Type a message and press Enter!
 
 ### Try Note Companion in the fork build
 
-Open a Markdown note, select a passage, then expand **Note companion** in the chat and choose **Add selection**. Type your question, choose **Preview next send**, and inspect **Review outbound context** before clicking **Send these blocks**. To place a reply without another model request, use **Place a reply in a note** and review the diff before applying. See the [Note Companion guide](/usage/note-companion).
+Open a Markdown note, select a passage, then open **Note tools** in the composer and choose **Add selection**; a chip shows it. Type your question and send, or choose **Review & send** to inspect **Review outbound context** before clicking **Send these blocks**. To place a reply without another model request, choose **Use in note…** under the reply and review the diff before applying. See the [Note Companion guide](/usage/note-companion).
 
 - Learn about [Note Mentions](/usage/mentions) to reference your notes in conversations
 - Explore [Slash Commands](/usage/slash-commands) for quick actions

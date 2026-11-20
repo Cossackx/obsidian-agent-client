@@ -5,8 +5,8 @@ Note Companion is part of this fork's development source. The plugin manifest is
 ## Start with a passage
 
 1. Open a Markdown note in an editable view and select a passage. Open an Agent Client chat and expand **Note companion** above the composer. Use **Add selection**, or run **Agent Client: Add selection to note companion** from the command palette.
-2. Type a question and choose **Preview next send** (or **Send**). In **Review outbound context**, check the prompt and blocks going to the configured ACP agent. Choose **Send these blocks** to send, or **Cancel** to keep working locally.
-3. To keep part of the answer, expand **Place a reply in a note**, choose a destination and preview the change. Literal placement makes no model request. To have the agent rewrite or integrate the answer, use **Editorial capture** and review its proposal.
+2. The composer shows a chip for each source the next send carries. The active note appears as one dashed **following** chip; × removes it for this conversation and ○ pins it as a session source. Drag notes onto the composer to mention them, onto **Note tools** to stage them, or use **+ Context** for mentions and **Note tools** (selection, headings, folders). Type a question and choose **Send**. A send whose sources are all visible as chips goes straight out. If the payload carries anything not shown in the composer — truncated text, a template or destination quote, a generated request, or a source without a chip — **Review outbound context** opens with the reasons, and **Send these blocks** sends exactly those bytes. **Review & send** opens the same review on demand; **Cancel** keeps working locally.
+3. To keep part of the answer, choose **Use in note…** under that reply (it stays bound to that reply, not the latest one), then **Place a reply in a note**: choose a destination and preview the change. Literal placement makes no model request. To have the agent rewrite or integrate the answer, use **Editorial capture** and review its proposal.
 
 ## Build and preview a working set
 
@@ -17,7 +17,7 @@ Note Companion is part of this fork's development source. The plugin manifest is
 | **Add open note**    | A snapshot of an open Markdown note. You can also drag Markdown notes onto the tray or composer.                                              |
 | **Pin working note** | A full-note snapshot of the active note as a session-pinned working item. Following the active note in the tray does not itself pin anything. |
 
-Use full vault-relative paths to distinguish notes with the same basename. Use **Move up**, **Move down**, and **Remove** to manage the set. **Compact tray** changes the layout, not what is sent.
+Use full vault-relative paths to distinguish notes with the same basename. Use **Move up**, **Move down**, and **Remove** to manage the set. **Note tools** opens on demand and closes again; it changes the layout, not what is sent. **Note conversations** lists the conversations linked to the active note.
 
 - **Working** materials are the main inputs; **Reference** materials are supporting inputs. Both can send text. **Destination only** does not attach the note body. **Choose destination** sets a placement target separately; it is not the same as adding the note as a source. A deliberate editorial request can include the destination section in its preview.
 - **Pin to session** keeps an item available for later turns in the same conversation. **Use once** makes it next-turn context: the client consumes it when its inclusion in a completed turn is confirmed, not merely because you previewed or pressed Send.

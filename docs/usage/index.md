@@ -16,7 +16,7 @@ The chat panel opens in the right sidebar.
 
 ## Sending Messages
 
-In this fork's build, expand **Note companion** to stage passages, headings and full notes. **Preview next send** and normal sends show **Review outbound context** before dispatch. For local edits, draft recovery and note-linked sessions, see [Note Companion](/usage/note-companion).
+In this fork's build, context chips in the composer show what the next send carries; **Note tools** stages passages, headings and full notes. Sends with material not shown as a chip, and **Review & send**, show **Review outbound context** before dispatch. For local edits, draft recovery and note-linked sessions, see [Note Companion](/usage/note-companion).
 
 1. Type your message in the input field at the bottom
 2. Press `Enter` or click the send button

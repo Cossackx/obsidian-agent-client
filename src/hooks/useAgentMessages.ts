@@ -45,7 +45,10 @@ import {
 export interface SendMessageOptions {
 	preparedContext?: PreparedContext;
 	generatedInstruction?: string;
-	approvePayload?: (blocks: readonly PromptContent[]) => Promise<boolean>;
+	approvePayload?: (
+		blocks: readonly PromptContent[],
+		sources: PreparedContext["sources"],
+	) => Promise<boolean>;
 	structuredRequestId?: string;
 	onConfirmed?: (
 		reply: string,
@@ -390,7 +393,10 @@ export function useAgentMessages(
 				);
 				if (
 					options.approvePayload &&
-					!(await options.approvePayload(prepared.agentContent))
+					!(await options.approvePayload(
+						prepared.agentContent,
+						prepared.sources,
+					))
 				)
 					return;
 				if (

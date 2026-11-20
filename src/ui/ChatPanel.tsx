@@ -45,9 +45,16 @@ import { useCompanionComposer } from "../hooks/useCompanionComposer";
 import type { SavedSessionInfo } from "../types/session";
 import type { ContextItem } from "../types/note-companion";
 import { ContextTray, type StructuredTurn } from "./ContextTray";
-import { putItem } from "../services/companion-state";
 import { readCorrelatedReply } from "../services/passage-review";
 import { confirmPayload } from "./ContextPreviewModal";
+import { ComposerContext } from "./ComposerContext";
+import {
+	composerChips,
+	type ComposerChip,
+} from "../services/companion-presentation";
+import { putItem, refreshItem } from "../services/companion-state";
+import { decideSendReview } from "../services/send-review-policy";
+import { extractMentionedNotes } from "../utils/mention-parser";
 import { prepareContext } from "../services/context-builder";
 import {
 	companionStatusLabel,
@@ -572,11 +579,42 @@ export const ChatPanel = React.memo(function ChatPanel({
 	// ============================================================
 	// Chat Actions
 	// ============================================================
+	// One active-note representation: a dismissed follow or an explicit
+	// item for the same path keeps auto-follow out of the payload.
+	const followActivePath = suggestions.mentions.isAutoMentionDisabled
+		? undefined
+		: suggestions.mentions.activeNote?.path;
+	const { chips: contextChips, following } = composerChips({
+		items: companion.state?.items ?? [],
+		activePath: followActivePath,
+		activeSelection: suggestions.mentions.activeNote?.selection && {
+			fromLine: suggestions.mentions.activeNote.selection.from.line + 1,
+			toLine: suggestions.mentions.activeNote.selection.to.line + 1,
+		},
+		followDismissed: companion.state?.followDismissed ?? false,
+	});
+	const followSuppressed = !!followActivePath && !following;
+	const sendSuggestions = useMemo(
+		() =>
+			followSuppressed
+				? {
+						...suggestions,
+						mentions: {
+							...suggestions.mentions,
+							isAutoMentionDisabled: true,
+						},
+					}
+				: suggestions,
+		[suggestions, followSuppressed],
+	);
+	const [toolsOpen, setToolsOpen] = useState(false);
+	const [boundReply, setBoundReply] = useState<string | null>(null);
+	const reviewNext = useRef(false);
 	const actions = useChatActions(
 		plugin,
 		agent,
 		sessionHistory,
-		suggestions,
+		sendSuggestions,
 		session,
 		messages,
 		settings,
@@ -654,6 +692,8 @@ export const ChatPanel = React.memo(function ChatPanel({
 		}
 		preparingCompanion.current = true;
 		setPreviewing(true);
+		const requested = reviewNext.current;
+		reviewNext.current = false;
 		const requestId = turn?.onReply ? crypto.randomUUID() : undefined;
 		try {
 			const items = [...(turn?.items ?? snapshot?.items ?? [])];
@@ -712,12 +752,35 @@ export const ChatPanel = React.memo(function ChatPanel({
 						? `${turn?.text} Wrap that exact result in this JSON object: {"requestId":${JSON.stringify(requestId)},"result":<the requested value>}. Echo the requestId verbatim and emit only that JSON object.`
 						: turn?.text,
 					structuredRequestId: requestId,
-					approvePayload: async (blocks) =>
-						(await confirmPayload(
-							plugin.app,
-							blocks,
-							prepared.notices,
-						)) && ownsComposer(),
+					approvePayload: async (blocks, sources) => {
+						const decision = decideSendReview({
+							sources,
+							represented: [
+								...items
+									.filter(
+										(item) => item.role !== "destination",
+									)
+									.map((item) => item.source.path),
+								...(following && followActivePath
+									? [followActivePath]
+									: []),
+								...extractMentionedNotes(content, vaultService)
+									.map((note) => note.file?.path)
+									.filter((path): path is string => !!path),
+							],
+							notices: prepared.notices,
+							generated: !!turn,
+							requested,
+						});
+						if (!decision.required) return ownsComposer();
+						return (
+							(await confirmPayload(
+								plugin.app,
+								blocks,
+								decision.reasons,
+							)) && ownsComposer()
+						);
+					},
 					onConfirmed: (text, id, assistantId, sources) => {
 						if (sources.length)
 							void companion.confirmed(
@@ -1821,6 +1884,10 @@ export const ChatPanel = React.memo(function ChatPanel({
 			expandedToolCalls={expandedToolCalls}
 			onToggleToolCall={toggleToolCall}
 			hasActivePermission={agent.hasActivePermission}
+			onUseReply={(id) => {
+				setBoundReply(id);
+				setToolsOpen(true);
+			}}
 		/>
 	);
 
@@ -1968,156 +2035,292 @@ export const ChatPanel = React.memo(function ChatPanel({
 					</button>
 				</p>
 			)}
-			<ContextTray
-				key={session.sessionId ?? "unbound"}
-				companion={companion}
-				activePath={
-					!suggestions.mentions.isAutoMentionDisabled
-						? suggestions.mentions.activeNote?.path
-						: undefined
-				}
-				previewNext={async () => {
-					const text = inputValueRef.current;
-					const files = attachedFilesRef.current;
-					if (!text.trim() && !files.length) {
-						new Notice(
-							"Enter a draft to preview the full outbound turn.",
-						);
-						return false;
+			{toolsOpen && (
+				<ContextTray
+					key={session.sessionId ?? "unbound"}
+					companion={companion}
+					boundReplyId={boundReply}
+					onClose={() => {
+						setToolsOpen(false);
+						setBoundReply(null);
+					}}
+					messages={messages}
+					canSend={isSessionReady && !reconnecting}
+					busy={
+						previewing ||
+						isSending ||
+						reconnecting ||
+						sessionHistory.loading
 					}
-					return sendCurrentRef.current(text.trim(), files);
-				}}
-				messages={messages}
-				canSend={isSessionReady && !reconnecting}
-				busy={
-					previewing ||
-					isSending ||
-					reconnecting ||
-					sessionHistory.loading
-				}
-				send={(turn) => sendWithCompanion(turn.text, undefined, turn)}
-				openContinuity={async () => {
-					const path =
-						(await vaultService.getActiveNote())?.path ??
-						companion.state?.destination?.path;
-					if (!path)
-						throw new Error(
-							"Open a Markdown note to find its conversations.",
-						);
-					await openNoteSessionPicker(plugin, path, {
-						canResume: (saved) =>
-							saved.agentId === session.agentId &&
-							saved.cwd === agentCwd &&
-							sessionHistory.canRestore &&
-							acpClient.isInitialized(),
-						newChat: async (selected: ContextItem[]) => {
-							if (
-								!ownsComposer() ||
-								changingOwner.current ||
-								preparingCompanion.current ||
-								isSending
-							)
-								return;
-							changingOwner.current = true;
-							invalidateComposer();
-							setReconnecting(true);
-							try {
-								await companion.flush();
-								if (!mounted.current) return;
-								await handleNewChatWithPersist(undefined, true);
-								if (!mounted.current) return;
-								const id = acpClient.getConfirmedSessionId();
-								if (!id || id === session.sessionId) return;
-								if (selected.length)
-									await plugin.companionStorage.update(
-										id,
-										(old) => ({
-											...old,
-											items: selected.map((item) => ({
-												...item,
-												id: crypto.randomUUID(),
-											})),
-										}),
-									);
-							} finally {
-								changingOwner.current = false;
-								setReconnecting(false);
-							}
-						},
-						open: async (saved, resume) => {
-							if (
-								!ownsComposer() ||
-								changingOwner.current ||
-								preparingCompanion.current ||
-								isSending
-							)
-								return;
-							const compatible =
+					send={(turn) =>
+						sendWithCompanion(turn.text, undefined, turn)
+					}
+					openContinuity={async () => {
+						const path =
+							(await vaultService.getActiveNote())?.path ??
+							companion.state?.destination?.path;
+						if (!path)
+							throw new Error(
+								"Open a Markdown note to find its conversations.",
+							);
+						await openNoteSessionPicker(plugin, path, {
+							canResume: (saved) =>
 								saved.agentId === session.agentId &&
 								saved.cwd === agentCwd &&
-								acpClient.getCurrentAgentId() === saved.agentId;
-							setReconnecting(true);
-							try {
-								if (resume && compatible) {
-									try {
-										await sessionHistory.restoreSession(
-											saved.sessionId,
-											saved.cwd,
+								sessionHistory.canRestore &&
+								acpClient.isInitialized(),
+							newChat: async (selected: ContextItem[]) => {
+								if (
+									!ownsComposer() ||
+									changingOwner.current ||
+									preparingCompanion.current ||
+									isSending
+								)
+									return;
+								changingOwner.current = true;
+								invalidateComposer();
+								setReconnecting(true);
+								try {
+									await companion.flush();
+									if (!mounted.current) return;
+									await handleNewChatWithPersist(
+										undefined,
+										true,
+									);
+									if (!mounted.current) return;
+									const id =
+										acpClient.getConfirmedSessionId();
+									if (!id || id === session.sessionId) return;
+									if (selected.length)
+										await plugin.companionStorage.update(
+											id,
+											(old) => ({
+												...old,
+												items: selected.map((item) => ({
+													...item,
+													id: crypto.randomUUID(),
+												})),
+											}),
 										);
-										if (
-											!mounted.current ||
-											acpClient.hasLiveSession(
-												saved.sessionId,
-											)
-										)
-											return;
-									} catch (error) {
-										if (
-											error instanceof
-											ConversationOwnershipError
-										)
-											throw error;
-										if (!mounted.current) return;
-										new Notice(
-											"Resume failed; opening local history without a connection.",
-										);
-									}
+								} finally {
+									changingOwner.current = false;
+									setReconnecting(false);
 								}
-								await withRestoreOwner(
-									saved.sessionId,
-									async (stillMounted) => {
-										const history =
-											await plugin.settingsService.loadSessionMessages(
+							},
+							open: async (saved, resume) => {
+								if (
+									!ownsComposer() ||
+									changingOwner.current ||
+									preparingCompanion.current ||
+									isSending
+								)
+									return;
+								const compatible =
+									saved.agentId === session.agentId &&
+									saved.cwd === agentCwd &&
+									acpClient.getCurrentAgentId() ===
+										saved.agentId;
+								setReconnecting(true);
+								try {
+									if (resume && compatible) {
+										try {
+											await sessionHistory.restoreSession(
 												saved.sessionId,
+												saved.cwd,
 											);
-										if (!stillMounted()) return;
-										await acpClient.disconnect();
-										if (!stillMounted()) return;
-										const current =
-											agent.getCurrentTranscript(
-												saved.sessionId,
+											if (
+												!mounted.current ||
+												acpClient.hasLiveSession(
+													saved.sessionId,
+												)
+											)
+												return;
+										} catch (error) {
+											if (
+												error instanceof
+												ConversationOwnershipError
+											)
+												throw error;
+											if (!mounted.current) return;
+											new Notice(
+												"Resume failed; opening local history without a connection.",
 											);
-										historyOwner.current = saved;
-										publishedId.current = saved.sessionId;
-										const preferences =
-											agent.updateSessionFromLoad(
-												saved.sessionId,
+										}
+									}
+									await withRestoreOwner(
+										saved.sessionId,
+										async (stillMounted) => {
+											const history =
+												await plugin.settingsService.loadSessionMessages(
+													saved.sessionId,
+												);
+											if (!stillMounted()) return;
+											await acpClient.disconnect();
+											if (!stillMounted()) return;
+											const current =
+												agent.getCurrentTranscript(
+													saved.sessionId,
+												);
+											historyOwner.current = saved;
+											publishedId.current =
+												saved.sessionId;
+											const preferences =
+												agent.updateSessionFromLoad(
+													saved.sessionId,
+												);
+											agent.setMessagesFromLocal(
+												current ?? history ?? [],
 											);
-										agent.setMessagesFromLocal(
-											current ?? history ?? [],
-										);
-										await preferences;
-									},
-								);
-							} finally {
-								setReconnecting(false);
-							}
-						},
-					});
-				}}
-			/>
+											await preferences;
+										},
+									);
+								} finally {
+									setReconnecting(false);
+								}
+							},
+						});
+					}}
+				/>
+			)}
 		</>
 	);
+	const editChip = async (chip: ComposerChip) => {
+		if (!companion.state || !ownsComposer()) return;
+		if (chip.kind === "following") {
+			await companion.update(
+				(old) => ({ ...old, followDismissed: true }),
+				"follow",
+			);
+			return;
+		}
+		await companion.update(
+			(old) => ({
+				...old,
+				items: old.items.filter((row) => row.id !== chip.itemId),
+			}),
+			`item:${chip.itemId}:remove`,
+		);
+	};
+	const pinChip = async (chip: ComposerChip) => {
+		const sessionId = companion.state?.sessionId;
+		if (!sessionId || !ownsComposer()) return;
+		if (chip.kind === "following") {
+			const text = await vaultService.readNote(chip.path);
+			await companion.update(
+				(old) =>
+					putItem(old, {
+						id: crypto.randomUUID(),
+						source: {
+							path: chip.path,
+							text,
+							capturedAt: Date.now(),
+						},
+						role: "working",
+						lifetime: "session",
+						scope: { kind: "note" },
+					}),
+				`add:${crypto.randomUUID()}`,
+			);
+			return;
+		}
+		await companion.update(
+			(old) => ({
+				...old,
+				items: old.items.map((row) =>
+					row.id === chip.itemId
+						? {
+								...row,
+								lifetime:
+									row.lifetime === "session"
+										? "turn"
+										: "session",
+							}
+						: row,
+				),
+			}),
+			`item:${chip.itemId}:lifetime`,
+		);
+	};
+	const refreshChip = async (chip: ComposerChip) => {
+		const item = companion.state?.items.find(
+			(row) => row.id === chip.itemId,
+		);
+		if (!item || !ownsComposer()) return;
+		const change = refreshItem(item, {
+			path: item.source.path,
+			text: await vaultService.readNote(item.source.path),
+			capturedAt: Date.now(),
+		});
+		await companion.update(
+			(old) => ({
+				...old,
+				items: old.items.map((row) =>
+					row.id === item.id ? { ...row, ...change } : row,
+				),
+			}),
+			`item:${item.id}:capture`,
+		);
+	};
+	const chipWork = (work: () => Promise<unknown>) =>
+		void work().catch(
+			(error: unknown) =>
+				new Notice(
+					error instanceof Error
+						? error.message
+						: "Context did not change",
+				),
+		);
+	const contextRow = companion.state ? (
+		<ComposerContext
+			chips={contextChips}
+			disabled={previewing || isSending || reconnecting}
+			toolsOpen={toolsOpen}
+			onRemove={(chip) => chipWork(() => editChip(chip))}
+			onTogglePin={(chip) => chipWork(() => pinChip(chip))}
+			onRefresh={(chip) => chipWork(() => refreshChip(chip))}
+			onAdd={(event) => {
+				const menu = new Menu();
+				menu.addItem((item: MenuItem) =>
+					item.setTitle("Add note…").onClick(() => {
+						updateCompanionDraft(`${inputValueRef.current}@`);
+					}),
+				);
+				menu.addItem((item: MenuItem) =>
+					item
+						.setTitle("Note tools: selection, headings, folders")
+						.onClick(() => setToolsOpen(true)),
+				);
+				if (companion.state?.followDismissed)
+					menu.addItem((item: MenuItem) =>
+						item.setTitle("Follow active note again").onClick(() =>
+							chipWork(() =>
+								companion.update(
+									(old) => ({
+										...old,
+										followDismissed: false,
+									}),
+									"follow",
+								),
+							),
+						),
+					);
+				menu.showAtMouseEvent(event.nativeEvent);
+			}}
+			onTools={() => setToolsOpen((open) => !open)}
+			onPreview={() => {
+				const text = inputValueRef.current;
+				const files = attachedFilesRef.current;
+				if (!text.trim() && !files.length) {
+					new Notice("Enter a draft to review the outbound turn.");
+					return;
+				}
+				reviewNext.current = true;
+				void sendCurrentRef.current(text.trim(), files).finally(() => {
+					reviewNext.current = false;
+				});
+			}}
+		/>
+	) : undefined;
 	const inputAreaElement = (
 		<InputArea
 			key={session.sessionId ?? "unbound"}
@@ -2130,6 +2333,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 			queuedPermissionCount={queuedPermissionCount}
 			onApprovePermission={agent.approvePermission}
 			autoMentionEnabled={settings.autoMentionActiveNote}
+			contextRow={contextRow}
 			suggestions={suggestions}
 			plugin={plugin}
 			view={viewHost}

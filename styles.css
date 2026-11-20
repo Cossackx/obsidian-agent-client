@@ -115,11 +115,64 @@ If your plugin does not need CSS, delete this file.
 	padding: var(--size-4-2);
 	color: var(--text-muted);
 }
-.xo-note-compact {
-	padding-block: var(--size-2-1);
+.xo-composer-context {
+	padding: var(--size-4-1) var(--size-4-2) 0;
+	font-size: var(--font-ui-smaller);
 }
-.xo-note-compact .xo-note-chip {
-	margin-block: 0;
+.xo-composer-chips {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--size-4-1);
+	align-items: center;
+}
+.xo-chip {
+	display: inline-flex;
+	align-items: center;
+	max-width: 100%;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-l);
+	background: var(--background-secondary);
+}
+.xo-chip-following {
+	border-style: dashed;
+}
+.xo-chip-stale {
+	border-color: var(--text-warning);
+}
+.xo-chip button,
+.xo-chip-add {
+	height: auto;
+	padding: 0 var(--size-4-1);
+	background: transparent;
+	box-shadow: none;
+	font-size: inherit;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.xo-chip-label {
+	max-width: 14rem;
+}
+.xo-chip-add {
+	color: var(--text-muted);
+}
+.xo-chip-details {
+	display: grid;
+	gap: var(--size-2-1);
+	margin-top: var(--size-4-1);
+	padding: var(--size-4-1) var(--size-4-2);
+	border-radius: var(--radius-s);
+	background: var(--background-secondary);
+	overflow-wrap: anywhere;
+}
+.xo-composer-context :focus-visible {
+	outline: 2px solid var(--interactive-accent);
+	outline-offset: 1px;
+}
+.xo-note-tools-head {
+	display: flex;
+	gap: var(--size-4-2);
+	align-items: center;
 }
 /* ===== Session Manager ===== */
 

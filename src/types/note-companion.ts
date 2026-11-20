@@ -71,6 +71,8 @@ export interface CompanionState {
 	items: ContextItem[];
 	draft: string;
 	compact?: boolean;
+	/** User removed the auto-follow chip for this conversation. */
+	followDismissed?: boolean;
 	favourites?: string[];
 	destination: DestinationAnchor | null;
 	operations: { proposal: NoteEditProposal; receipt: WriteReceipt }[];
