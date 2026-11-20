@@ -18,9 +18,13 @@ No. Agent Client is desktop-only. Agents run as local processes, which is not su
 
 ### Is my data sent to AI providers?
 
-Yes. When you send a message, it's processed by the AI provider behind your selected agent (Anthropic, OpenAI, Google, etc.). Review each provider's privacy policy for details.
+The plugin sends prompts to the configured agent. The agent may forward them to a provider and read more using its tools. **Review outbound context** shows the client's blocks, not the agent's independent reads or the provider's retention. Check the agent and provider settings before sending confidential material.
 
 ## Note Mentions
+
+### Why do I not see Note Companion?
+
+It is in this fork's development source, not the upstream Community Plugins or BRAT build. The manifest remains `0.13.2`. In the fork's desktop build, expand **Note companion** in the chat. See the [guide](/usage/note-companion).
 
 ### How do I reference my notes in a conversation?
 
@@ -38,7 +42,7 @@ When enabled (**Settings → Agent Client → Mentions → Auto-mention active n
 
 ### Can I include just part of a note?
 
-Yes. If you select text in your note, only that selection is sent as context. The auto-mention badge shows the line range (e.g., `@My Note:5-10`).
+Yes. Ordinary auto-mention can include a selection as well as the path. Use **Add selection** to stage an exact passage rather than relying on the current editor state, then review the full outbound preview. Other inputs can also be present; the selection does not limit filesystem access.
 
 ### Does the agent see the notes my note links to?
 
@@ -103,9 +107,9 @@ Each agent provides its own commands. Claude Code, Codex, Gemini CLI, Mistral Vi
 
 Some agents request permission before performing certain actions (like editing files or running commands). This is a safety feature controlled by the agent.
 
-### Can I auto-approve all permissions?
+### What does Auto-allow permissions do?
 
-Yes. Enable **Settings → Agent Client → Permissions → Auto-allow permissions**. Use with caution—this gives agents full access without confirmation prompts.
+**Settings → Agent Client → Permissions → Auto-allow permissions** selects `allow_once` when the agent offers it. It does not grant new OS permissions. Outbound preview, local **Apply this change**, and provider login are separate from a pending tool request.
 
 ### Some agents don't ask for permission at all?
 
@@ -130,6 +134,10 @@ Yes. Enable **Auto-export on new chat** or **Auto-export on close chat** in expo
 Yes. In **Settings → Agent Client → Export → Frontmatter tag**, you can set a custom tag. Nested tags like `projects/agent-client` are supported.
 
 ## Session History
+
+### Does seeing history mean I am connected?
+
+No. **History only · not connected** can show the saved transcript but cannot send a prompt. Use **Connection details** → **Reconnect** with the saved agent and working directory, or start a new chat. The runtime adapter name alone does not identify the provider profile. See [Note conversations](/usage/note-companion#continue-a-conversation).
 
 ### How do I resume a previous conversation?
 
@@ -183,6 +191,8 @@ The plugin itself is free and open source. However, using AI agents may incur co
 3. Open a new issue if your problem isn't covered
 
 ### How do I report a bug?
+
+For fork-specific behavior, use the [fork repository](https://github.com/Cossackx/obsidian-agent-client). Reproduce with synthetic notes and remove credentials, personal paths, transcript text and vault data before sharing.
 
 [Open an issue on GitHub](https://github.com/RAIT-09/obsidian-agent-client/issues/new) with:
 - Your OS and Obsidian version

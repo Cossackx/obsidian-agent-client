@@ -4,6 +4,8 @@ Reference your Obsidian notes directly in conversations with AI agents.
 
 ## Auto-Mention Active Note
 
+Auto-mention is separate from [Note Companion](/usage/note-companion). Use **Add selection**, **Add heading**, or **Add open note** for an explicit snapshot, and **Preview next send** to review the assembled blocks. Staged and destination-only paths are not silently added again through normal mentions. Text you type still goes out, and these choices do not restrict agent tool access.
+
 When enabled, the plugin automatically includes the currently active note in your message. This is useful when you want to discuss or work on the note you're viewing.
 
 Enable this in **Settings → Agent Client → Mentions → Auto-mention active note**.
@@ -70,7 +72,7 @@ To prevent excessively large messages, the plugin limits the amount of content i
 | Setting | Default | Description |
 |---------|---------|-------------|
 | **Max note length** | 10,000 characters | Maximum characters per mentioned note |
-| **Max selection length** | 10,000 characters | Maximum characters for text selection in auto-mention |
+| **Max selection length** | 10,000 characters | Maximum characters for selections and Companion excerpts |
 
 Configure these in **Settings → Agent Client → Mentions**.
 

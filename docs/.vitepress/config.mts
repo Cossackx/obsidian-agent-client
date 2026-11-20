@@ -1,6 +1,7 @@
 import { defineConfig } from "vitepress";
 
 export default defineConfig({
+  // Local-only records must not become pages or search entries.
   srcExclude: ["superpowers/**"],
   title: "Agent Client",
   description:
@@ -26,8 +27,8 @@ export default defineConfig({
     [
       "meta",
       {
-        name: "og:url",
-        content: "https://rait-09.github.io/obsidian-agent-client/",
+        name: "og:site_name",
+        content: "Agent Client fork documentation",
       },
     ],
   ],
@@ -38,7 +39,8 @@ export default defineConfig({
       { text: "Getting Started", link: "/getting-started/" },
       { text: "Agent Setup", link: "/agent-setup/" },
       { text: "Usage", link: "/usage/" },
-      { text: "GitHub", link: "https://github.com/RAIT-09/obsidian-agent-client" },
+      { text: "Note Companion", link: "/usage/note-companion" },
+      { text: "Fork on GitHub", link: "https://github.com/Cossackx/obsidian-agent-client" },
     ],
 
     sidebar: [
@@ -75,6 +77,7 @@ export default defineConfig({
         text: "Usage",
         items: [
           { text: "Basic Usage", link: "/usage/" },
+          { text: "Note Companion", link: "/usage/note-companion" },
           { text: "Note Mentions", link: "/usage/mentions" },
           { text: "Sending Images and Files", link: "/usage/sending-images" },
           { text: "Embeddable Blocks", link: "/usage/embeddable-blocks" },
@@ -89,7 +92,6 @@ export default defineConfig({
           { text: "Chat Export", link: "/usage/chat-export" },
           { text: "Commands & Hotkeys", link: "/usage/commands" },
           { text: "Context Files", link: "/usage/context-files" },
-          { text: "Note Companion", link: "/usage/note-companion" },
           { text: "Prompt Injection", link: "/usage/prompt-injection" },
           { text: "MCP Tools", link: "/usage/mcp-tools" },
         ],
@@ -105,6 +107,7 @@ export default defineConfig({
         text: "Reference",
         items: [
           { text: "ACP Protocol Support", link: "/reference/acp-support" },
+          { text: "Note Companion Verification", link: "/reference/note-companion-verification" },
         ],
       },
       {
@@ -121,12 +124,12 @@ export default defineConfig({
     socialLinks: [
       {
         icon: "github",
-        link: "https://github.com/RAIT-09/obsidian-agent-client",
+        link: "https://github.com/Cossackx/obsidian-agent-client",
       },
     ],
 
     footer: {
-      message: "Released under the Apache 2.0 License.",
+      message: "Apache 2.0 License. Note Companion is fork development.",
       copyright: "Copyright © 2025-present RAIT-09",
     },
 

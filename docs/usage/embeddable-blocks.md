@@ -68,7 +68,7 @@ A single space between the number and the unit is tolerated and collapsed — bo
 
 #### noteContext
 
-By default an embedded chat auto-mentions whichever note is currently active, just like a sidebar chat. Setting `noteContext: hosting` pins auto-mention to the note that contains the block, so the chat always has the surrounding note as context even while you click around elsewhere.
+By default an embedded chat auto-mentions the active note when auto-mention applies. `noteContext: hosting` chooses the note that contains the block instead. This selects the auto-mention source; it does not attach the full note, create a pinned [Companion](/usage/note-companion) snapshot or constrain tool access. Inspect the outbound preview in the fork build.
 
 ::: tip
 `hosting` is currently the only accepted value. Any other value is treated as a structural error (see [Validation](#validation-and-warnings)).
@@ -79,9 +79,9 @@ By default an embedded chat auto-mentions whichever note is currently active, ju
 By default an embedded chat starts a fresh session each time the note is reopened. Set `persist: true` to have the block reattach to its most recent saved session on reload.
 
 ::: warning Device-local by design
-The mapping between a block and its saved session lives in **this device's plugin data**, not in the note. It is **never written into the note** and is **not synced** between devices. A session id is **never** stored in your Markdown.
+The mapping between a block and its saved session lives in the vault's **plugin data**, not in the note. Only the stable block ID belongs in Markdown. Copying the note alone does not copy the mapping, draft or conversation; backup or sync may separately copy plugin data.
 
-The practical effect: a persisted chat reattaches to its history on the device where it was created, while the same note opened on another device simply starts fresh. Your notes stay portable and contain no machine-specific identifiers.
+A live restore still depends on the saved agent, working directory and its ACP capabilities.
 :::
 
 ### Stable block id
@@ -90,7 +90,7 @@ Persistence keys on a device-neutral `id` so the mapping survives renaming or mo
 
 - If a `persist` chat block **does not** declare an `id`, the plugin generates one and injects it into the fence **once** — you will see an `id:` line appear in the block the first time it renders. After that the value is fixed.
 - If you **hand-write** an `id`, it is honored as-is and never overwritten.
-- If the persisted session **cannot be restored** (for example, the agent no longer has that session), the block **silently starts a fresh chat** rather than showing an error.
+- A block mounts a new chat before attempting a persistent restore. If no restore is available it may stay fresh; a failed attempt may show a notice. Do not assume a new session continued the old one. A persistent block cannot take over an already-owned conversation; close the other owner or return to it. Closing one embedded view does not disconnect the others.
 
 ::: tip
 Auto-injection only happens for `persist: true` chat blocks that lack an `id`. Non-persisted blocks and button blocks are never modified.

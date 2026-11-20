@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/RAIT-09/obsidian-agent-client/blob/master/README.ja.md">日本語はこちら</a>
+  <a href="README.ja.md">日本語はこちら</a>
 </p>
 
 <p align="center">
@@ -25,6 +25,8 @@ Chat with Claude Code, Codex, Gemini CLI, and any ACP agent right in Obsidian �
 MCP servers, Agent Skills, slash commands, permission prompts — whatever your agent can do, it works here out of the box.
 
 Built on the [Agent Client Protocol (ACP)](https://github.com/agentclientprotocol/agent-client-protocol) by Zed.
+
+**Fork development:** [Note Companion](docs/usage/note-companion.md) lets you stage passages or notes, preview the prompt, and place replies with a local diff and verified write receipt. It also supports annotated review, source-linked synthesis, and note-linked conversation recovery. The manifest remains `0.13.2`; the upstream badges and installation links do not represent a Note Companion release.
 
 ![Chat with an agent in the sidebar, right next to your notes](https://raw.githubusercontent.com/RAIT-09/obsidian-agent-client/master/docs/public/images/readme-hero-sidebar.webp)
 
@@ -74,15 +76,17 @@ Built on the [Agent Client Protocol (ACP)](https://github.com/agentclientprotoco
 2. Open **Settings → Agent Client** and check the agent's path — **Auto-detect** usually finds it
 3. Click the robot icon in the ribbon and start chatting
 
+Using this fork's development build? Expand **Note companion**, choose **Add selection** or **Add open note**, and click **Preview next send**. See the [guide](docs/usage/note-companion.md) for precise placement and session recovery.
+
 **[Full Documentation](https://rait-09.github.io/obsidian-agent-client/)**
 
 ## Security & Permissions
 
-Agent Client is a desktop-only plugin. It launches your locally installed agents as child processes and lets them run terminal commands — that is the core of what it does. The filesystem is only probed read-only for the **Auto-detect** button; all note reading and writing goes through Obsidian's vault API.
+Agent Client is a desktop-only plugin. It launches local agents as child processes and supports ACP terminal requests. Companion note operations use Obsidian's vault API, not ACP text-file read/write handlers.
 
-Keep in mind that **the agents themselves have the same full system access they have in a terminal**. The plugin surfaces every permission request so you can approve or reject each action; **Auto-allow permissions** (off by default) skips those prompts entirely — enable it only if you understand the implications.
+Agent tools have the access granted by their process, settings and operating system, not by the context tray. The plugin surfaces permission requests the agent sends. **Auto-allow permissions** (off by default) selects **allow once** when offered. Outbound preview and **Apply this change** are separate from tool permissions.
 
-API keys are stored in Obsidian's Keychain, never as plain text. What leaves your machine is what you send to your agent's provider: your messages, mentioned notes, and attachments.
+Plugin-managed API keys are stored in Obsidian's Keychain. The preview shows what the plugin sends to the configured agent, not everything the agent, tools or provider might read, transmit or retain.
 
 ## Other Ways to Install
 

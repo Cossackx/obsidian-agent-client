@@ -30,6 +30,8 @@ Each agent uses its own context file:
 
 Place the context file in your **vault root** to have the agent read it automatically.
 
+Agents that look for context files in their working directory may load a different file when you start a chat outside the vault. This discovery is separate from [Note Companion](/usage/note-companion), which stages excerpts for specific prompts. The outbound preview cannot list files the agent discovers or opens independently.
+
 ## Example
 
 ```markdown

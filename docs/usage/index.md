@@ -16,6 +16,8 @@ The chat panel opens in the right sidebar.
 
 ## Sending Messages
 
+In this fork's build, expand **Note companion** to stage passages, headings and full notes. **Preview next send** and normal sends show **Review outbound context** before dispatch. For local edits, draft recovery and note-linked sessions, see [Note Companion](/usage/note-companion).
+
 1. Type your message in the input field at the bottom
 2. Press `Enter` or click the send button
 3. Wait for the agent's response

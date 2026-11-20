@@ -10,8 +10,11 @@ hero:
       text: Get Started
       link: /getting-started/
     - theme: alt
-      text: View on GitHub
-      link: https://github.com/RAIT-09/obsidian-agent-client
+      text: Note Companion
+      link: /usage/note-companion
+    - theme: alt
+      text: Fork Source on GitHub
+      link: https://github.com/Cossackx/obsidian-agent-client
 
 features:
   - icon: 🤖
@@ -20,6 +23,10 @@ features:
   - icon: 📝
     title: Note Mentions
     details: Mention any note with @notename to include its content in your prompt
+  - icon: 📎
+    title: Note Companion
+    details: Preview note context, place replies, and return to note-linked conversations in this fork's development build
+    link: /usage/note-companion
   - icon: ⚡
     title: Slash Commands
     details: Use / commands to quickly trigger agent actions
@@ -43,6 +50,8 @@ features:
 ## What is Agent Client?
 
 Agent Client is an Obsidian plugin that brings AI coding agents directly into your vault. Built on the [Agent Client Protocol (ACP)](https://github.com/agentclientprotocol/agent-client-protocol), it enables seamless communication with various AI agents.
+
+This site documents the fork's development source alongside baseline Agent Client features. The upstream installation does not include [Note Companion](/usage/note-companion).
 
 ### Supported Agents
 

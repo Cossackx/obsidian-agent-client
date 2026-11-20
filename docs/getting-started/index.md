@@ -2,6 +2,8 @@
 
 ## Install the Plugin
 
+The installation routes below are for upstream Agent Client. [Note Companion](/usage/note-companion) is in this fork's development source; the unchanged `0.13.2` manifest does not indicate that a Community Plugins, BRAT or upstream release includes it. Agent Client requires desktop Obsidian; Windows can use a native agent or the supported WSL configuration.
+
 ### From Community Plugins (Recommended)
 
 1. In Obsidian, open **Settings → Community Plugins → Browse**

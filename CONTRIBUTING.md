@@ -185,6 +185,8 @@ Please ensure these pass locally before submitting.
 
 ## Architecture Overview
 
+The current desktop build uses React 18.3. For Note Companion, `ChatPanel` composes the working-set and restore hooks; `services/` handles snapshots, proposals, local writes and readback. See [architecture](ARCHITECTURE.md#note-companion-data-flow) and the [verification note](docs/reference/note-companion-verification.md) for the reviewed scope and synthetic-vault checks.
+
 ```
 src/
 ├── types/          # Pure type definitions (no logic, no dependencies)

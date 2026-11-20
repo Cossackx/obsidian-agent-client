@@ -140,6 +140,16 @@ The message was sent but the agent returned an error.
 2. Verify your API key or login status
 3. Try a simpler message to test the connection
 
+## Note Companion issues
+
+- **The tray is missing:** Check that this is the fork's desktop development build; `0.13.2` alone does not distinguish it from upstream. Model-backed actions also require a configured ACP agent and a live session.
+- **Context looks stale or incomplete:** Inspect **Review outbound context**. Refresh a note or heading, recapture a selection, and check the note and selection limits. A canceled preview sends nothing; an uncertain turn is not automatically repeated.
+- **There is history but I cannot send:** Check **Connection details**. **Reconnect** needs the saved agent and working directory and cannot substitute a new session for a failed restore. Use the owning view if the conversation is already open, or start a distinct chat with checked context.
+- **A preview no longer applies:** Save or resolve destination edits and preview again. For `pending`, `unknown`, or `undo-pending`, inspect the file and choose **Reconcile without writing** in **Write receipts** before retrying. Do not bypass a save warning by repeating the edit.
+- **A tool choice is hard to see:** Focus the active chat and use Tab or Shift+Tab to reveal the permission choices. Read the operation and use the option the agent supplied; a connection label or local note diff cannot clear a pending ACP decision.
+
+See the [Note Companion guide](/usage/note-companion) for the full workflow. For Windows launch problems, distinguish a native command from a WSL command; Companion's local note operations still use the desktop vault rather than adding ACP file handlers.
+
 ## Export Issues
 
 ### "Failed to export chat" notification

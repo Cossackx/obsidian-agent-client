@@ -22,10 +22,10 @@ Methods the plugin can call on agents.
 | `session/prompt` | ✅ Supported | |
 | `session/cancel` | ✅ Supported | |
 | `session/set_mode` | ✅ Supported | |
-| `session/load` | ✅ Supported | |
+| `session/load` | ✅ Supported | Agent must advertise load support; may replay history |
 | `session/set_model` | ✅ Supported | Unstable API |
 | `session/list` | ✅ Supported | Unstable API |
-| `session/resume` | ✅ Supported | Unstable API |
+| `session/resume` | ✅ Supported | Unstable API; resumes without history replay |
 | `session/fork` | ✅ Supported | Unstable API |
 | `session/set_config_option` | ✅ Supported | |
 
@@ -101,10 +101,11 @@ Capabilities advertised to agents during initialization.
 | `terminal` | `true` |
 
 ::: info
-The plugin does not implement filesystem operations (`fs/read_text_file`, `fs/write_text_file`). Agents handle file operations through their own tools.
+The plugin does not expose ACP text-file operations (`fs/read_text_file`, `fs/write_text_file`). [Note Companion](/usage/note-companion) writes use the Obsidian vault API after explicit local confirmation and do not widen advertised capabilities. The agent may use its own tools; the client can only surface permission requests the agent issues. Outbound context approval is not a tool permission.
 :::
 
 ## See Also
 
+- [Note Companion Verification](/reference/note-companion-verification)
 - [Agent Client Protocol Specification](https://agentclientprotocol.com/)
 - [ACP Schema Reference](https://agentclientprotocol.com/protocol/schema)

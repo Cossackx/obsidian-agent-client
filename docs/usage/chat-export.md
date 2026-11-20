@@ -38,7 +38,7 @@ Chats are exported as Markdown files with YAML frontmatter:
 created: 2025-12-13T00:31:12
 agentDisplayName: Claude Code
 agentId: claude-agent-acp
-session_id: f95b4847-cb9c-441a-9f0b-08eb243ff5dd
+session_id: example-session
 tags: [agent-client]  # Customizable in settings
 ---
 
@@ -56,7 +56,7 @@ Summarize this, please.
 
 ### 🔧 Read File
 
-**Locations**: `/Users/rait09/Documents/dev_vault/Agent Client Plugin.md:0`
+**Locations**: `Projects/Example.md:0`
 
 **Status**: completed
 
@@ -67,6 +67,8 @@ This is an Obsidian plugin that integrates AI coding agents (Claude Code, Codex,
 ```
 
 ## What Gets Exported
+
+Exports use the displayed conversation, not the [Note Companion](/usage/note-companion) sidecar. They do not package unsent drafts, staged captures, sent snapshots or receipts as separate records. Exports are not a dump of approved ACP blocks or a redaction tool. Replies, tools, paths, frontmatter and media may contain sensitive information; inspect the Markdown and related files before sharing.
 
 - **Messages**: Full conversation history with timestamps
 - **Images**: Attached images (saved as files or embedded, based on settings)

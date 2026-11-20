@@ -2,9 +2,11 @@
 
 ## Overview
 
-Obsidian plugin for AI agent interaction via ACP. `useAgent` facade hook composes sub-hooks (`useAgentSession` + `useAgentMessages`) and subscribes to a single `onSessionUpdate` channel. `ChatPanel` orchestrates hooks and renders children directly. Services are injected via React Context. ACP protocol details are isolated in the `acp/` layer.
+Desktop Obsidian plugin built with React 18.3 and TypeScript. The `useAgent` facade composes `useAgentSession` and `useAgentMessages` and subscribes to a single `onSessionUpdate` channel. `ChatPanel` orchestrates hooks and renders children. Services are injected via React Context; ACP protocol details are isolated in `acp/`. This describes fork development source with manifest `0.13.2`, not a tagged Note Companion release.
 
 ## Directory Structure
+
+This tree shows selected baseline files. The fork additions are described in [Note Companion data flow](#note-companion-data-flow).
 
 ```
 src/
@@ -101,7 +103,7 @@ src/
 | File | Purpose |
 |------|---------|
 | `acp-client.ts` | UI-facing API: process spawn/kill, JSON-RPC communication, session management. Owns AcpHandler + managers. Single exit point: `onSessionUpdate` (multiple listeners via Set). |
-| `acp-handler.ts` | SDK-facing: receives sessionUpdate, requestPermission, terminal ops. Filters by `currentSessionId`. Broadcasts to all listeners. |
+| `acp-handler.ts` | SDK-facing: receives session updates, permission requests and terminal operations. Filters by session ID, captures restore updates, and broadcasts accepted updates. |
 | `type-converter.ts` | Converts ACP SDK types to internal types (change buffer for protocol updates) |
 | `permission-handler.ts` | Permission request queue, auto-approve, Promise-based resolution. All UI updates via `onSessionUpdate` (no separate callback path). |
 | `terminal-handler.ts` | Terminal process create/output/kill, stdout/stderr buffering |
@@ -123,7 +125,7 @@ src/
 | `session-helpers.ts` | Pure functions — agent config building, API key injection, agent settings resolution |
 | `session-state.ts` | Pure functions — legacy mode/model application, config option restoration |
 | `message-state.ts` | Pure functions — message array transforms (streaming apply, tool call upsert with O(1) index, permission scanning) |
-| `message-sender.ts` | Pure functions — prompt preparation (embedded context vs XML text, shared helpers), sending with auth retry |
+| `message-sender.ts` | Prepares prompts (embedded context or text), handles mention exclusions, and sends. The legacy auth-retry path does not replay approved Companion turns. |
 | `chat-exporter.ts` | `ChatExporter` class — markdown export with frontmatter, image handling |
 | `view-registry.ts` | `ChatViewRegistry` class — multi-view focus tracking, broadcast commands. Exports `IChatViewContainer`. |
 | `update-checker.ts` | Agent version checking via npm registry |
@@ -140,7 +142,7 @@ src/
 | `useAgentSession` | Session lifecycle (create/close/restart), mode/model/configOption with optimistic updates. Uses `sessionRef` pattern. |
 | `useAgentMessages` | Message state, RAF-batched streaming, permissions (activePermission derivation, approve/reject) |
 | `useSuggestions` | @[[note]] mentions + /command suggestions (unified). Return is `useMemo`-wrapped. |
-| `useSessionHistory` | Session list/load/resume/fork, local session storage, 5-min cache. Return is `useMemo`-wrapped. |
+| `useSessionHistory` | Session list/load/resume/fork, exact-ID restore, local transcript preference, and list cache. Return is `useMemo`-wrapped. |
 | `useChatActions` | Business callbacks (send, newChat, export, restart, config changes). Individual method deps for stability. |
 | `useHistoryModal` | Session history modal lifecycle (lazy creation, props sync) |
 | `useSettings` | Settings subscription via useSyncExternalStore |
@@ -212,6 +214,18 @@ ChatView / FloatingChatView
 | `logger.ts` | Singleton logger respecting debugMode setting |
 
 ---
+
+## Note Companion data flow
+
+**Capture and send.** `vault-service.ts` and `utils/selection.ts` capture editor ranges and map line endings. `context-builder.ts` derives heading occurrences and prepares scoped, bounded blocks with source provenance. `ChatPanel` combines them with ordinary inputs through `message-sender.ts`. `ContextPreviewModal` reviews the same prepared blocks `useAgentMessages` dispatches. Only confirmed completion records sent sources and consumes the included next-turn items. Structured replies are correlated to the live request and owner.
+
+**State and views.** `useNoteCompanion` owns sidecar loading, draft/context persistence and storage retries. `companion-state.ts` manages context and confirmed turns; `companion-storage.ts` uses alternating revisioned copies distinct from `session-storage.ts` transcripts. `useCompanionComposer` binds drafts and in-memory files to a conversation owner. `view-registry.ts`, `useRestoreOwner` and `usePersistentEmbedRestore` reserve and hand off ownership, including embedded restores. `ChatView` can project the same mounted sidebar chat into an editor tab without creating another process. Closing an embedded chat tears down that view, not its neighbours.
+
+**Restore.** `AcpClient` captures inbound updates for the requested ID during load/resume and checks the live connection before publishing. `useSessionHistory` commits display ownership before releasing replay and prefers an already accepted transcript for that ID. `AcpHandler` cancels permission requests during restore rather than presenting them as live choices. History-only display does not authorize a send. `note-session-index.ts`, `source-comparison.ts` and `NoteSessionPicker` find exact path associations, preserve original sent snapshots across renames, and compare their scope with current notes.
+
+**Local writes.** `ContextTray` delegates literal planning to `note-edit-planner.ts`; `passage-review.ts`, `capture-proposal.ts` and `synthesis-request.ts` define the generated workflows. `NoteActionModal` confirms changes. Shared `NoteActionService` serializes per path, records intent before mutation, compares the complete saved preimage and checks for unsaved editor changes before calling the vault API. Exact readback backs a verified receipt. Reconciliation never mutates content. ACP file capabilities remain disabled; real agent tool requests use `PermissionDialog` and the existing permission queue.
+
+See [Note Companion verification](docs/reference/note-companion-verification.md) for acceptance coverage and limits.
 
 ## Dependency Flow
 

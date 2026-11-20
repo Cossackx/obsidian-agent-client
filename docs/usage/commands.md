@@ -8,6 +8,8 @@ Commands operate on the **last focused chat view**. Click on a chat view to focu
 
 ## Chat Commands
 
+**Agent Client: Add selection to note companion** stages the current Markdown editor selection; it does not send a prompt. Review it in [Note Companion](/usage/note-companion). **Approve active permission** and **Reject active permission** act on a pending ACP request, not on the outbound preview or local note-change dialog.
+
 | Command | Description |
 |---------|-------------|
 | **Open chat view** | Open the chat panel |

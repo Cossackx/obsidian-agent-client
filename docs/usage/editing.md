@@ -2,6 +2,8 @@
 
 Agent Client allows AI agents to edit files in your vault and working directory.
 
+[Note Companion](/usage/note-companion#place-a-reply-without-rewriting-it) adds a separate local editing flow. **Apply this change** approves only the reviewed Companion diff. It checks the saved before text and reports success only after reading back the expected result. Literal placement makes no model request; editorial requests generate proposals, not write approvals.
+
 ## How Editing Works
 
 When you ask the agent to modify files:
@@ -22,16 +24,18 @@ Some agents request permission before performing certain actions. When a permiss
 1. Review the proposed action
 2. Select one of the available options provided by the agent
 
+**Needs approval** indicates a real ACP tool request. Review the command, path, or diff when supplied. Use Tab or Shift+Tab to reach the choices in a narrow pane. **Approve active permission** and **Reject active permission** select the corresponding one-time option when available. These decisions are separate from provider sign-in, outbound preview and local edits.
+
 ::: tip
 Permission options vary by agent. Some agents may not request permission at all and edit files directly.
 :::
 
 ### Auto-Allow Permissions
 
-In **Settings → Agent Client → Permissions → Auto-allow permissions**, you can automatically allow all permission requests from agents.
+In **Settings → Agent Client → Permissions → Auto-allow permissions**, the plugin automatically chooses `allow_once` when offered. Otherwise the request still needs a decision.
 
 ::: warning
-Use with caution—this gives agents full access to your system without confirmation prompts.
+Use with caution: automatically allowed requests do not get individual review. Agent tool access is independent of this setting and the context tray. Agents may also act without requesting ACP permission.
 :::
 
 ## Viewing Changes
@@ -62,6 +66,8 @@ Collapsed diffs can be expanded by clicking on them.
 3. **Start small**: Test with minor edits before complex changes
 
 ## Undo Changes
+
+For a Companion edit, use [Write receipts](/usage/note-companion#receipts-conflicts-and-undo). Reconcile a pending or unknown result before retrying. Agent tool edits do not generate Companion receipts.
 
 If an agent makes unwanted changes:
 

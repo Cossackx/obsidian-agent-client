@@ -25,6 +25,8 @@ This is useful when you want to work with different agents side-by-side, or run 
 2. Search for **"Open new chat view"**
 3. A new chat view opens in your configured location
 
+In the fork build, **Connection details** → **Move to editor tab** in a sidebar chat relocates the same mounted conversation; closing that tab returns it to the source pane. This does not create a second process, draft or permission queue. Use **Open new chat view** for an independent conversation. See [Note Companion](/usage/note-companion#continue-a-conversation).
+
 ### Via Header Menu
 
 1. Click the **⋮** (ellipsis) menu in the chat header
@@ -52,6 +54,8 @@ Control multiple chat views at once from the command palette:
 
 ::: tip
 Broadcast commands are useful for comparing how different agents respond to the same prompt.
+
+In the fork build, review outbound blocks for each send. Broadcast prompt copies composer input, not another conversation's Companion working set. Each target view uses its own context and session.
 :::
 
 ## Focus Navigation

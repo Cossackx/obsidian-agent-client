@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/RAIT-09/obsidian-agent-client/blob/master/README.md">English is here</a>
+  <a href="README.md">English is here</a>
 </p>
 
 <p align="center">
@@ -25,6 +25,8 @@ Claude Code、Codex、Gemini CLI をはじめとする ACP エージェントと
 MCP サーバー、Agent Skills、スラッシュコマンド、権限プロンプト — エージェントができることは、追加設定なしでそのまま動きます。
 
 Zed の [Agent Client Protocol (ACP)](https://github.com/agentclientprotocol/agent-client-protocol) の上に構築されています。
+
+**このフォークの開発版:** [Note Companion](docs/usage/note-companion.md) ではノートや選択範囲の送信内容を確認でき、回答を差分の確認後にノートへ反映できます。書き込み結果の照合、注釈付きレビュー、出典付きの統合、ノートに関連する会話の再開にも対応します。マニフェストは `0.13.2` のままです。上流のバッジやインストール手順は Note Companion のリリースを示すものではありません。
 
 ![ノートの隣のサイドバーでエージェントとチャット](https://raw.githubusercontent.com/RAIT-09/obsidian-agent-client/master/docs/public/images/readme-hero-sidebar.webp)
 
@@ -74,15 +76,17 @@ Zed の [Agent Client Protocol (ACP)](https://github.com/agentclientprotocol/age
 2. **設定 → Agent Client** でエージェントのパスを確認します — **Auto-detect** でほとんどの場合見つかります
 3. リボンのロボットアイコンをクリックしてチャット開始
 
+このフォークの開発ビルドでは **Note companion** を開き、**Add selection** または **Add open note** を選びます。**Preview next send** で送信する内容を確認できます。詳しくは [使い方ガイド（英語）](docs/usage/note-companion.md) を参照してください。
+
 **[ドキュメント全文](https://rait-09.github.io/obsidian-agent-client/)**
 
 ## セキュリティと権限
 
-Agent Client はデスクトップ専用のプラグインです。ローカルにインストールされたエージェントを子プロセスとして起動し、ターミナルコマンドを実行させます — それこそがこのプラグインの本体です。ファイルシステムへの直接アクセスは **Auto-detect** ボタンのための読み取り専用の探索だけで、ノートの読み書きはすべて Obsidian の vault API を経由します。
+Agent Client はデスクトップ専用です。ローカルのエージェントを子プロセスとして起動し、ACP のターミナル要求に対応します。Note Companion は Obsidian の Vault API を使い、ACP のテキストファイル読み書き機能は公開しません。
 
-**エージェント自身は、ターミナルで実行するときと同じフルシステムアクセスを持ちます**。プラグインはすべての権限リクエストを表示し、操作ごとに承認・拒否できます。**Auto-allow permissions**（既定はオフ）はこのプロンプトを省略するため、意味を理解した上でのみ有効化してください。
+ツールがアクセスできる範囲はプロセスや設定、OS の権限で決まり、トレイで選んだ範囲には制限されません。プラグインが表示するのはエージェントが送信した権限要求です。**Auto-allow permissions**（既定はオフ）は選択肢に「今回のみ許可」がある場合にそれを選びます。送信プレビューや **Apply this change** はツール操作の許可とは別です。
 
-API キーは Obsidian の Keychain に保存され、平文では保存されません。マシンの外へ出るのは、エージェントのプロバイダーに送信する内容 — メッセージ・メンションしたノート・添付ファイル — です。
+プラグインが管理する API キーは Obsidian の Keychain に保存されます。プレビューで確認できるのはプラグインからエージェントへ送る内容であり、エージェントやツール、プロバイダーが読み取り、送信し、保存するすべての内容ではありません。
 
 ## その他のインストール方法
 

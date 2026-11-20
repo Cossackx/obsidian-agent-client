@@ -40,6 +40,8 @@ Assign a keyboard shortcut to **"Open session manager"** in **Settings → Hotke
 
 Each session entry shows an icon reflecting its current state:
 
+The manager lists mounted views, not all saved conversations. A disconnected view can display local history without being able to send. A **Permission** status indicates an ACP tool request, not a review dialog or a provider login. Use [Note conversations](/usage/note-companion#continue-a-conversation) for saved note-linked conversations.
+
 | Icon | Status | Meaning |
 |------|--------|---------|
 | <img src="/images/status-ready.webp" alt="Ready" width="32" /> | **Ready** | The session is connected and idle, waiting for your next message |
