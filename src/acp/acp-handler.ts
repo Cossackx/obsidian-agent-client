@@ -188,15 +188,15 @@ export class AcpHandler {
 	}
 
 	// ====================================================================
-	// File System Stubs
+	// Disabled File System Methods
 	// ====================================================================
 
-	readTextFile(_params: acp.ReadTextFileRequest) {
-		return Promise.resolve({ content: "" });
+	readTextFile(_params: acp.ReadTextFileRequest): never {
+		throw acp.RequestError.methodNotFound("fs/read_text_file");
 	}
 
 	writeTextFile(_params: acp.WriteTextFileRequest) {
-		return Promise.resolve({});
+		throw acp.RequestError.methodNotFound("fs/write_text_file");
 	}
 
 	// ====================================================================

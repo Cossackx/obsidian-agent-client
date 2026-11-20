@@ -81,17 +81,16 @@ export class PermissionManager {
 			params,
 		);
 
-		// If auto-allow is enabled, automatically approve the first allow option
-		if (this.autoAllow) {
-			const allowOption =
-				params.options.find(
-					(option) =>
-						option.kind === "allow_once" ||
-						option.kind === "allow_always" ||
-						(!option.kind &&
-							option.name.toLowerCase().includes("allow")),
-				) || params.options[0]; // fallback to first option
-
+		if (params.options.length === 0) {
+			throw acp.RequestError.invalidParams(
+				undefined,
+				"No permission options supplied",
+			);
+		}
+		const allowOption = this.autoAllow
+			? params.options.find((option) => option.kind === "allow_once")
+			: undefined;
+		if (allowOption) {
 			this.logger.log(
 				"[PermissionManager] Auto-allowing permission request:",
 				allowOption,
@@ -112,18 +111,10 @@ export class PermissionManager {
 
 		const normalizedOptions: PermissionOption[] = params.options.map(
 			(option) => {
-				// Use the agent-provided kind as-is. Only infer from the
-				// option name when a non-conforming agent omits kind.
-				const kind: PermissionOption["kind"] = option.kind
-					? option.kind
-					: option.name.toLowerCase().includes("allow")
-						? "allow_once"
-						: "reject_once";
-
 				return {
 					optionId: option.optionId,
 					name: option.name,
-					kind,
+					kind: option.kind ?? "reject_once",
 				};
 			},
 		);
@@ -153,9 +144,7 @@ export class PermissionManager {
 			title: toolCallInfo?.title ?? undefined,
 			status: toolCallInfo?.status || "pending",
 			kind: (toolCallInfo?.kind as acp.ToolKind | undefined) ?? undefined,
-			content: AcpTypeConverter.toToolCallContent(
-				toolCallInfo?.content,
-			),
+			content: AcpTypeConverter.toToolCallContent(toolCallInfo?.content),
 			rawInput: toolCallInfo?.rawInput as
 				| { [k: string]: unknown }
 				| undefined,

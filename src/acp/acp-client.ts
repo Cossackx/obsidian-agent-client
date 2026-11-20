@@ -77,6 +77,8 @@ export class AcpClient {
 	// Connection & process
 	private connection: acp.ClientConnection | null = null;
 	private agentProcess: ChildProcess | null = null;
+	private lifetime = 0;
+	private stopping: Promise<void> | null = null;
 	private currentConfig: AgentConfig | null = null;
 	private isInitializedFlag = false;
 	private currentAgentId: string | null = null;
@@ -122,6 +124,35 @@ export class AcpClient {
 	 * Spawns the agent process and establishes ACP connection.
 	 */
 	async initialize(config: AgentConfig): Promise<InitializeResult> {
+		const lifetime = ++this.lifetime;
+		await this.stopOwnedResources();
+		if (lifetime !== this.lifetime)
+			throw new Error("Agent connection attempt cancelled");
+		try {
+			return await this.launch(config, lifetime);
+		} catch (error) {
+			this.logger.error("[AcpClient] Initialization Error:", error);
+			if (lifetime === this.lifetime) {
+				try {
+					await this.stopOwnedResources();
+				} catch (cleanupError) {
+					this.logger.error(
+						"[AcpClient] Agent termination could not be confirmed:",
+						cleanupError,
+					);
+					throw new Error(
+						"Agent initialization failed and termination could not be confirmed",
+					);
+				}
+			}
+			throw error;
+		}
+	}
+
+	private async launch(
+		config: AgentConfig,
+		lifetime: number,
+	): Promise<InitializeResult> {
 		this.logger.log(
 			"[AcpClient] Starting initialization with config:",
 			this.getSafeConfigForLog(config),
@@ -129,17 +160,6 @@ export class AcpClient {
 		this.logger.log(
 			`[AcpClient] Current state - process: ${!!this.agentProcess}, PID: ${this.agentProcess?.pid}`,
 		);
-
-		// Clean up existing process if any (e.g., when switching agents)
-		if (this.agentProcess) {
-			this.killProcessTree();
-		}
-
-		// Clean up existing connection
-		if (this.connection) {
-			this.logger.log("[AcpClient] Cleaning up existing connection");
-			this.connection = null;
-		}
 
 		this.currentConfig = config;
 
@@ -273,6 +293,12 @@ export class AcpClient {
 		});
 
 		agentProcess.on("error", (error) => {
+			if (
+				this.lifetime !== lifetime ||
+				this.agentProcess !== agentProcess
+			)
+				return;
+			this.connection?.close(error);
 			this.logger.error(
 				`[AcpClient] ${agentLabel} process error:`,
 				error,
@@ -306,10 +332,15 @@ export class AcpClient {
 				signal,
 			);
 
-			// A replaced process's late exit must not cancel the successor's work.
-			if (this.agentProcess === agentProcess) {
-				this.cancelAllOperations();
-			}
+			if (
+				this.lifetime !== lifetime ||
+				this.agentProcess !== agentProcess ||
+				this.stopping
+			)
+				return;
+			this.connection?.close();
+			this.isInitializedFlag = false;
+			this.cancelAllOperations();
 
 			if (code === 127) {
 				this.logger.error(`[AcpClient] Command not found: ${command}`);
@@ -345,6 +376,11 @@ export class AcpClient {
 
 		agentProcess.stderr?.setEncoding("utf8");
 		agentProcess.stderr?.on("data", (data) => {
+			if (
+				this.lifetime !== lifetime ||
+				this.agentProcess !== agentProcess
+			)
+				return;
 			this.logger.log(`[AcpClient] ${agentLabel} stderr:`, data);
 			// Keep a rolling window of recent stderr for error diagnostics
 			this.recentStderr += data;
@@ -419,30 +455,33 @@ export class AcpClient {
 			.onRequest("terminal/release", (ctx) =>
 				this.handler.releaseTerminal(ctx.params),
 			);
-		this.connection = app.connect(stream);
+		const connection = app.connect(stream);
+		this.connection = connection;
 
-		try {
+		{
 			this.logger.log("[AcpClient] Starting ACP initialization...");
 
-			const initResult = await this.connection.agent.request(
-				"initialize",
-				{
-					protocolVersion: acp.PROTOCOL_VERSION,
-					clientCapabilities: {
-						fs: {
-							readTextFile: false,
-							writeTextFile: false,
-						},
-						terminal: true,
+			const initResult = await connection.agent.request("initialize", {
+				protocolVersion: acp.PROTOCOL_VERSION,
+				clientCapabilities: {
+					fs: {
+						readTextFile: false,
+						writeTextFile: false,
 					},
-					clientInfo: {
-						name: "obsidian-agent-client",
-						title: "Agent Client for Obsidian",
-						version: this.plugin.manifest.version,
-					},
+					terminal: true,
 				},
-			);
+				clientInfo: {
+					name: "obsidian-agent-client",
+					title: "Agent Client for Obsidian",
+					version: this.plugin.manifest.version,
+				},
+			});
 
+			if (lifetime !== this.lifetime || connection.signal.aborted) {
+				throw new Error(
+					"Agent connection closed during initialization",
+				);
+			}
 			this.logger.log(
 				`[AcpClient] ✅ Connected to agent (protocol v${initResult.protocolVersion})`,
 			);
@@ -455,14 +494,6 @@ export class AcpClient {
 			this.currentAgentId = config.id;
 
 			return AcpTypeConverter.toInitializeResult(initResult);
-		} catch (error) {
-			this.logger.error("[AcpClient] Initialization Error:", error);
-
-			// Reset flags on failure
-			this.isInitializedFlag = false;
-			this.currentAgentId = null;
-
-			throw error;
 		}
 	}
 
@@ -637,60 +668,92 @@ export class AcpClient {
 	 * (requires detached: true on spawn). Falls back to regular kill.
 	 * On Windows, uses taskkill /T for tree kill.
 	 */
-	private killProcessTree(): void {
-		if (!this.agentProcess) return;
-
-		const pid = this.agentProcess.pid;
-		this.logger.log(`[AcpClient] Killing process tree (PID: ${pid})`);
-
-		try {
-			if (Platform.isWin && pid) {
-				// Windows: taskkill /T kills the entire process tree
-				spawn("taskkill", ["/PID", String(pid), "/T", "/F"], {
-					stdio: "ignore",
-				});
-			} else if (pid) {
-				// Unix: kill the entire process group (negative PID)
-				// Requires detached: true on spawn to create a process group
-				process.kill(-pid, "SIGTERM");
-			} else {
-				this.agentProcess.kill();
-			}
-		} catch {
-			// Fallback: kill just the direct process
+	private killProcessTree(child: ChildProcess): Promise<void> {
+		const exited = () =>
+			child.exitCode !== null || child.signalCode !== null;
+		if (exited()) return Promise.resolve();
+		const pid = child.pid;
+		return new Promise((resolve, reject) => {
+			const finish = (error?: Error) => {
+				clearTimeout(timeout);
+				child.off("exit", onExit);
+				child.off("close", onExit);
+				if (error) reject(error);
+				else resolve();
+			};
+			const onExit = () => finish();
+			const timeout = setTimeout(
+				() =>
+					finish(
+						new Error(
+							"Agent process termination was not confirmed",
+						),
+					),
+				5000,
+			);
+			child.once("exit", onExit);
+			child.once("close", onExit);
 			try {
-				this.agentProcess.kill();
-			} catch {
-				// Process may already be dead
+				if (Platform.isWin && pid) {
+					const killer = spawn(
+						"taskkill",
+						["/PID", String(pid), "/T", "/F"],
+						{ stdio: "ignore" },
+					);
+					killer.once("error", (error) => finish(error));
+					killer.once("exit", (code) => {
+						if (code !== 0 && !exited())
+							finish(
+								new Error(
+									"Agent process tree termination failed",
+								),
+							);
+					});
+				} else if (pid) process.kill(-pid, "SIGTERM");
+				else child.kill();
+			} catch (error) {
+				finish(
+					error instanceof Error
+						? error
+						: new Error("Agent process termination failed"),
+				);
 			}
-		}
-
-		this.agentProcess = null;
+		});
 	}
 
 	/**
 	 * Disconnect from the agent and clean up resources.
 	 */
 	disconnect(): Promise<void> {
-		this.logger.log("[AcpClient] Disconnecting...");
+		this.lifetime++;
+		return this.stopOwnedResources();
+	}
 
-		// Cancel all pending operations
-		this.cancelAllOperations();
-
-		// Kill the agent process tree
-		this.killProcessTree();
-
-		// Clear connection and config references
+	private stopOwnedResources(): Promise<void> {
+		if (this.stopping) return this.stopping;
+		const child = this.agentProcess;
+		const connection = this.connection;
 		this.connection = null;
 		this.currentConfig = null;
-
-		// Reset initialization state
 		this.isInitializedFlag = false;
 		this.currentAgentId = null;
 		this.currentSessionId = null;
-
-		this.logger.log("[AcpClient] Disconnected");
-		return Promise.resolve();
+		this.stopping = Promise.resolve()
+			.then(async () => {
+				try {
+					connection?.close();
+					this.cancelAllOperations();
+				} finally {
+					if (child) {
+						await this.killProcessTree(child);
+						this.agentProcess = null;
+					}
+				}
+			})
+			.finally(() => {
+				this.stopping = null;
+			});
+		return this.stopping;
 	}
 
 	/**
@@ -700,6 +763,7 @@ export class AcpClient {
 		return (
 			this.isInitializedFlag &&
 			this.connection !== null &&
+			!this.connection.signal.aborted &&
 			this.agentProcess !== null
 		);
 	}

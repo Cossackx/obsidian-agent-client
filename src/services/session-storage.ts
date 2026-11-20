@@ -128,6 +128,15 @@ export class SessionStorage {
 		this.settingsAccess = settingsAccess;
 	}
 
+	private enqueueOperation<T>(operation: () => Promise<T>): Promise<T> {
+		const result = this.sessionLock.then(operation);
+		this.sessionLock = result.then(
+			() => undefined,
+			() => undefined,
+		);
+		return result;
+	}
+
 	// ============================================================
 	// Session Metadata Methods
 	// ============================================================
@@ -139,7 +148,7 @@ export class SessionStorage {
 	 * Maintains max 50 sessions, removing oldest when exceeded.
 	 */
 	async saveSession(info: SavedSessionInfo): Promise<void> {
-		this.sessionLock = this.sessionLock.then(async () => {
+		return this.enqueueOperation(async () => {
 			// Convert Windows path to WSL path if in WSL mode
 			let sessionInfo = info;
 			const state = this.settingsAccess.getSnapshot();
@@ -174,7 +183,6 @@ export class SessionStorage {
 				savedSessions: sessions,
 			});
 		});
-		await this.sessionLock;
 	}
 
 	/**
@@ -236,7 +244,7 @@ export class SessionStorage {
 	 * Also deletes the associated message history file.
 	 */
 	async deleteSession(sessionId: string): Promise<void> {
-		this.sessionLock = this.sessionLock.then(async () => {
+		return this.enqueueOperation(async () => {
 			const state = this.settingsAccess.getSnapshot();
 			const sessions = (state.savedSessions || []).filter(
 				(s) => s.sessionId !== sessionId,
@@ -246,7 +254,6 @@ export class SessionStorage {
 			});
 			await this.deleteSessionMessages(sessionId);
 		});
-		await this.sessionLock;
 	}
 
 	/**
@@ -258,7 +265,7 @@ export class SessionStorage {
 		newTitle: string,
 		createIfMissing?: { agentId: string; cwd: string },
 	): Promise<void> {
-		this.sessionLock = this.sessionLock.then(async () => {
+		return this.enqueueOperation(async () => {
 			const state = this.settingsAccess.getSnapshot();
 			const sessions = [...(state.savedSessions || [])];
 			const idx = sessions.findIndex((s) => s.sessionId === sessionId);
@@ -297,7 +304,6 @@ export class SessionStorage {
 			// save would refresh it).
 			await this.syncTranscriptTitle(sessionId, newTitle);
 		});
-		await this.sessionLock;
 	}
 
 	/**
@@ -309,7 +315,7 @@ export class SessionStorage {
 		sessionId: string,
 		patch: Partial<Omit<SavedSessionInfo, "sessionId" | "createdAt">>,
 	): Promise<void> {
-		this.sessionLock = this.sessionLock.then(async () => {
+		return this.enqueueOperation(async () => {
 			const state = this.settingsAccess.getSnapshot();
 			const sessions = [...(state.savedSessions || [])];
 			const idx = sessions.findIndex((s) => s.sessionId === sessionId);
@@ -324,7 +330,6 @@ export class SessionStorage {
 				savedSessions: sessions,
 			});
 		});
-		await this.sessionLock;
 	}
 
 	// ============================================================
@@ -363,7 +368,7 @@ export class SessionStorage {
 		agentId: string,
 		messages: ChatMessage[],
 	): Promise<void> {
-		this.sessionLock = this.sessionLock.then(async () => {
+		return this.enqueueOperation(async () => {
 			await this.ensureSessionsDir();
 
 			// Self-contained archive: snapshot the index entry into the file
@@ -407,7 +412,6 @@ export class SessionStorage {
 				JSON.stringify(data, null, 2),
 			);
 		});
-		await this.sessionLock;
 	}
 
 	/**

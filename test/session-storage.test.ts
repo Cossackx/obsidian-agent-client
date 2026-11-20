@@ -54,9 +54,9 @@ function makeStorage() {
 	};
 	const settingsAccess = {
 		getSnapshot: () => state,
-		updateSettings: async (updates: Partial<StorageState>) => {
+		updateSettings: vi.fn(async (updates: Partial<StorageState>) => {
 			Object.assign(state, updates);
-		},
+		}),
 	};
 	const storage = new SessionStorage(
 		plugin as unknown as ConstructorParameters<typeof SessionStorage>[0],
@@ -64,8 +64,56 @@ function makeStorage() {
 			typeof SessionStorage
 		>[1],
 	);
-	return { storage, state, adapter, files };
+	return { storage, state, adapter, files, settingsAccess };
 }
+
+it.each(["save", "delete", "title", "update", "transcript"])(
+	"save_failure_does_not_poison_next_operation (%s)",
+	async (method) => {
+		const { storage, state, settingsAccess, adapter } = makeStorage();
+		const original = makeSession({ sessionId: "fixture" });
+		await storage.saveSession(original);
+		const error = new Error("synthetic storage failure");
+		if (method === "transcript") adapter.write.mockRejectedValueOnce(error);
+		else settingsAccess.updateSettings.mockRejectedValueOnce(error);
+		const failed = {
+			save: () => storage.saveSession(original),
+			delete: () => storage.deleteSession(original.sessionId),
+			title: () =>
+				storage.updateSessionTitle(original.sessionId, "Never saved"),
+			update: () =>
+				storage.updateSession(original.sessionId, {
+					title: "Never saved",
+				}),
+			transcript: () =>
+				storage.saveSessionMessages(
+					original.sessionId,
+					original.agentId,
+					[],
+				),
+		}[method as "save" | "delete" | "title" | "update" | "transcript"]();
+		const recovery = storage.saveSession(
+			makeSession({ sessionId: "next" }),
+		);
+		const rename = storage.updateSessionTitle("next", "Recovered");
+		const results = await Promise.allSettled([failed, recovery, rename]);
+		expect(results).toEqual([
+			{ status: "rejected", reason: error },
+			{ status: "fulfilled", value: undefined },
+			{ status: "fulfilled", value: undefined },
+		]);
+		expect(state.savedSessions).toEqual(
+			expect.arrayContaining([
+				original,
+				expect.objectContaining({
+					sessionId: "next",
+					title: "Recovered",
+				}),
+			]),
+		);
+		expect(adapter.remove).not.toHaveBeenCalled();
+	},
+);
 
 describe("SessionStorage — getSavedSessionByEmbedId (#5/#11)", () => {
 	it("returns the most-recently-updated match", () => {
@@ -573,7 +621,8 @@ describe("SessionStorage — stored permissions are settled on load", () => {
 
 	function loadedPermission(messages: ChatMessage[] | null) {
 		const content = messages?.[0]?.content[0];
-		if (content?.type !== "tool_call") throw new Error("expected tool_call");
+		if (content?.type !== "tool_call")
+			throw new Error("expected tool_call");
 		return content.permissionRequest;
 	}
 
