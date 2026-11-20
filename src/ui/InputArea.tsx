@@ -212,8 +212,6 @@ export interface InputAreaProps {
 	) => Promise<void>;
 	/** Whether auto-mention setting is enabled */
 	autoMentionEnabled: boolean;
-	/** Message to restore (e.g., after cancellation) */
-	restoredMessage: string | null;
 	/** Input suggestions (mentions + slash commands) */
 	suggestions: UseSuggestionsReturn;
 	/** Plugin instance */
@@ -227,8 +225,6 @@ export interface InputAreaProps {
 	) => Promise<boolean | void>;
 	/** Callback to stop the current generation */
 	onStopGeneration: () => Promise<void>;
-	/** Callback when restored message has been consumed */
-	onRestoredMessageConsumed: () => void;
 	/** Session mode state (available modes and current mode) */
 	modes?: SessionModeState;
 	/** Callback when mode is changed */
@@ -290,13 +286,11 @@ export function InputArea({
 	queuedPermissionCount = 0,
 	onApprovePermission,
 	autoMentionEnabled,
-	restoredMessage,
 	suggestions,
 	plugin,
 	view,
 	onSendMessage,
 	onStopGeneration,
-	onRestoredMessageConsumed,
 	modes,
 	onModeChange,
 	configOptions,
@@ -1057,27 +1051,6 @@ export function InputArea({
 			}
 		}, 0);
 	}, []);
-
-	// Restore message when provided (e.g., after cancellation)
-	// Only restore if input is empty to avoid overwriting user's new input
-	useEffect(() => {
-		if (restoredMessage) {
-			if (!inputValue.trim()) {
-				onInputChange(restoredMessage);
-				// Focus and place cursor at end
-				window.setTimeout(() => {
-					if (textareaRef.current) {
-						textareaRef.current.focus();
-						textareaRef.current.selectionStart =
-							restoredMessage.length;
-						textareaRef.current.selectionEnd =
-							restoredMessage.length;
-					}
-				}, 0);
-			}
-			onRestoredMessageConsumed();
-		}
-	}, [restoredMessage, onRestoredMessageConsumed, inputValue, onInputChange]);
 
 	// Placeholder text
 	const placeholder = `Message ${agentLabel} - @ to mention notes${availableCommands.length > 0 ? ", / for commands" : ""}`;

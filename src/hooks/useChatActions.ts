@@ -43,11 +43,14 @@ export interface UseChatActionsReturn {
 			| "approvePayload"
 			| "onConfirmed"
 			| "generatedInstruction"
-			| "collectStructuredReply"
+			| "structuredRequestId"
 		>,
 	) => Promise<boolean>;
 	handleStopGeneration: () => Promise<void>;
-	handleNewChat: (requestedAgentId?: string) => Promise<void>;
+	handleNewChat: (
+		requestedAgentId?: string,
+		forceFresh?: boolean,
+	) => Promise<void>;
 	handleExportChat: () => Promise<void>;
 	handleSwitchAgent: (agentId: string) => Promise<void>;
 	handleRestartAgent: () => Promise<void>;
@@ -59,10 +62,8 @@ export interface UseChatActionsReturn {
 	// UI state actions
 	handleClearError: () => void;
 	handleClearAgentUpdate: () => void;
-	handleRestoredMessageConsumed: () => void;
 
 	// State (moved from ChatPanel)
-	restoredMessage: string | null;
 	agentUpdateNotification: AgentUpdateNotification | null;
 	setAgentUpdateNotification: (n: AgentUpdateNotification | null) => void;
 
@@ -90,6 +91,7 @@ export function useChatActions(
 	settings: Pick<AgentClientPluginSettings, "windowsWslMode">,
 	vaultPath: string,
 	persistentEmbedId?: string,
+	hasLiveSession = false,
 ): UseChatActionsReturn {
 	const logger = getLogger();
 	const pendingIndex = useRef(new Map<string, () => Promise<void>>());
@@ -112,7 +114,6 @@ export function useChatActions(
 	// State (moved from ChatPanel)
 	// ============================================================
 
-	const [restoredMessage, setRestoredMessage] = useState<string | null>(null);
 	const [agentUpdateNotification, setAgentUpdateNotification] =
 		useState<AgentUpdateNotification | null>(null);
 
@@ -175,7 +176,7 @@ export function useChatActions(
 				| "approvePayload"
 				| "onConfirmed"
 				| "generatedInstruction"
-				| "collectStructuredReply"
+				| "structuredRequestId"
 			>,
 		) => {
 			// Dismiss overlays on send
@@ -282,24 +283,22 @@ export function useChatActions(
 
 	const handleStopGeneration = useCallback(async () => {
 		logger.log("Cancelling current operation...");
-		const lastMessage = agent.lastUserMessage;
+		// The controlled composer retains unsent drafts. Never reinsert an old prompt.
 		await agent.cancelOperation();
-		if (lastMessage) {
-			setRestoredMessage(lastMessage);
-		}
-	}, [logger, agent.cancelOperation, agent.lastUserMessage]);
+	}, [logger, agent.cancelOperation]);
 
 	const handleNewChat = useCallback(
-		async (requestedAgentId?: string) => {
+		async (requestedAgentId?: string, forceFresh = false) => {
 			const isAgentSwitch =
 				requestedAgentId && requestedAgentId !== session.agentId;
 
 			// Skip if already empty AND not switching agents
 			if (
+				!forceFresh &&
 				messages.length === 0 &&
 				!isAgentSwitch &&
 				session.sessionId &&
-				agent.isReady
+				hasLiveSession
 			) {
 				new Notice("[Agent Client] Already a new session");
 				return;
@@ -319,7 +318,9 @@ export function useChatActions(
 				await autoExportIfEnabled("newChat", messages, session);
 			}
 
-			suggestions.mentions.toggleAutoMention(false);
+			suggestions.mentions.toggleAutoMention(
+				!plugin.settings.autoMentionActiveNote,
+			);
 			agent.clearMessages();
 
 			const newAgentId = isAgentSwitch
@@ -335,6 +336,8 @@ export function useChatActions(
 			session,
 			logger,
 			autoExportIfEnabled,
+			hasLiveSession,
+			plugin,
 			agent.isSending,
 			agent.cancelOperation,
 			agent.clearMessages,
@@ -434,10 +437,6 @@ export function useChatActions(
 		setAgentUpdateNotification(null);
 	}, []);
 
-	const handleRestoredMessageConsumed = useCallback(() => {
-		setRestoredMessage(null);
-	}, []);
-
 	// ============================================================
 	// Return
 	// ============================================================
@@ -455,8 +454,6 @@ export function useChatActions(
 		handleSetConfigOption,
 		handleClearError,
 		handleClearAgentUpdate,
-		handleRestoredMessageConsumed,
-		restoredMessage,
 		agentUpdateNotification,
 		setAgentUpdateNotification,
 		autoExportIfEnabled,

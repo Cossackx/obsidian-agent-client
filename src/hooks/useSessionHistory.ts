@@ -96,6 +96,11 @@ export interface UseSessionHistoryOptions {
 	onMessagesRestore?: MessagesRestoreCallback;
 	/** Control whether useMessages ignores incoming updates (for history replay suppression) */
 	onIgnoreUpdates?: (ignore: boolean) => void;
+	/** Reserve the target before changing identity, route, or ACP state. */
+	withRestoreOwner: <T>(
+		sessionId: string,
+		operation: (stillMounted: () => boolean) => Promise<T>,
+	) => Promise<T>;
 	/** Clear messages before restoring from local storage */
 	onClearMessages?: () => void;
 }
@@ -148,7 +153,11 @@ export interface UseSessionHistoryReturn {
 	 * @param sessionId - Session to restore
 	 * @param cwd - Working directory for the session
 	 */
-	restoreSession: (sessionId: string, cwd: string) => Promise<void>;
+	restoreSession: (
+		sessionId: string,
+		cwd: string,
+		prepare?: (stillMounted: () => boolean) => Promise<void>,
+	) => Promise<void>;
 
 	/**
 	 * Fork a specific session to create a new branch.
@@ -278,6 +287,7 @@ export function useSessionHistory(
 		onMessagesRestore,
 		onIgnoreUpdates,
 		onClearMessages,
+		withRestoreOwner,
 	} = options;
 
 	// Derive capability flags from session.agentCapabilities
@@ -531,83 +541,98 @@ export function useSessionHistory(
 	 * Uses load if available (with history replay), otherwise resume (without history replay).
 	 */
 	const restoreSession = useCallback(
-		async (sessionId: string, cwd: string) => {
-			setLoading(true);
-			setError(null);
+		async (
+			sessionId: string,
+			cwd: string,
+			prepare?: (stillMounted: () => boolean) => Promise<void>,
+		) =>
+			withRestoreOwner(sessionId, async (stillMounted) => {
+				setLoading(true);
+				setError(null);
 
-			try {
-				// IMPORTANT: Update session.sessionId BEFORE calling restore
-				// so that session/update notifications are not ignored
-				onSessionLoad(sessionId, undefined, undefined);
+				try {
+					await prepare?.(stillMounted);
+					if (!stillMounted()) return;
+					const live = agentClient.getSessionRestoreCapabilities();
+					if (!live.load && !live.resume)
+						throw new Error("Session restoration is not supported");
+					onClearMessages?.();
+					// IMPORTANT: Update session.sessionId BEFORE calling restore
+					// so that session/update notifications are not ignored
+					onSessionLoad(sessionId, undefined, undefined);
 
-				if (capabilities.canLoad) {
-					// Check local messages first to decide whether to use them or agent replay
-					const localMessages =
-						await settingsAccess.loadSessionMessages(sessionId);
+					if (live.load) {
+						// Check local messages first to decide whether to use them or agent replay
+						const localMessages =
+							await settingsAccess.loadSessionMessages(sessionId);
+						if (!stillMounted()) return;
 
-					if (localMessages && onMessagesRestore) {
-						// Local messages available: ignore agent replay, restore from local
-						onIgnoreUpdates?.(true);
-						onClearMessages?.();
-						try {
+						if (localMessages && onMessagesRestore) {
+							// Local messages available: ignore agent replay, restore from local
+							onIgnoreUpdates?.(true);
+							try {
+								const result = await agentClient.loadSession(
+									sessionId,
+									cwd,
+								);
+								if (!stillMounted()) return;
+								onSessionLoad(
+									result.sessionId,
+									result.modes,
+									result.configOptions,
+								);
+								onMessagesRestore(localMessages);
+							} finally {
+								onIgnoreUpdates?.(false);
+							}
+						} else {
+							// No local messages: let agent replay flow through to UI
 							const result = await agentClient.loadSession(
 								sessionId,
 								cwd,
 							);
+							if (!stillMounted()) return;
 							onSessionLoad(
 								result.sessionId,
 								result.modes,
 								result.configOptions,
 							);
-							onMessagesRestore(localMessages);
-						} finally {
-							onIgnoreUpdates?.(false);
 						}
 					} else {
-						// No local messages: let agent replay flow through to UI
-						const result = await agentClient.loadSession(
+						// Use resume (without history replay, restore from local storage)
+						const result = await agentClient.resumeSession(
 							sessionId,
 							cwd,
 						);
+						if (!stillMounted()) return;
 						onSessionLoad(
 							result.sessionId,
 							result.modes,
 							result.configOptions,
 						);
-					}
-				} else if (capabilities.canResume) {
-					// Use resume (without history replay, restore from local storage)
-					const result = await agentClient.resumeSession(
-						sessionId,
-						cwd,
-					);
-					onSessionLoad(
-						result.sessionId,
-						result.modes,
-						result.configOptions,
-					);
 
-					// Resume doesn't return history, so restore from local storage
-					const localMessages =
-						await settingsAccess.loadSessionMessages(sessionId);
-					if (localMessages && onMessagesRestore) {
-						onMessagesRestore(localMessages);
+						// Resume doesn't return history, so restore from local storage
+						const localMessages =
+							await settingsAccess.loadSessionMessages(sessionId);
+						if (
+							stillMounted() &&
+							localMessages &&
+							onMessagesRestore
+						) {
+							onMessagesRestore(localMessages);
+						}
 					}
-				} else {
-					throw new Error("Session restoration is not supported");
+				} catch (err) {
+					const errorMessage = extractErrorMessage(err);
+					setError(`Failed to restore session: ${errorMessage}`);
+					throw err; // Re-throw to allow caller to handle
+				} finally {
+					setLoading(false);
 				}
-			} catch (err) {
-				const errorMessage = extractErrorMessage(err);
-				setError(`Failed to restore session: ${errorMessage}`);
-				throw err; // Re-throw to allow caller to handle
-			} finally {
-				setLoading(false);
-			}
-		},
+			}),
 		[
+			withRestoreOwner,
 			agentClient,
-			capabilities.canLoad,
-			capabilities.canResume,
 			onSessionLoad,
 			settingsAccess,
 			onMessagesRestore,
@@ -770,11 +795,7 @@ export function useSessionHistory(
 	 * Called when the first message is sent in a new session.
 	 */
 	const saveSessionLocally = useCallback(
-		async (
-			sessionId: string,
-			messageContent: string,
-			embedId?: string,
-		) => {
+		async (sessionId: string, messageContent: string, embedId?: string) => {
 			if (!session.agentId) return;
 
 			const title = truncateTitle(messageContent);

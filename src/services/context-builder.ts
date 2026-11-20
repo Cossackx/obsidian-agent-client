@@ -2,9 +2,10 @@ import type { PromptContent } from "../types/chat";
 import type {
 	CompanionState,
 	ContextItem,
+	ContextQuote,
 	TextRange,
 } from "../types/note-companion";
-import { truncateText } from "../utils/selection";
+import { selectionPositions, truncateText } from "../utils/selection";
 
 export function assertRange(range: TextRange, text: string): void {
 	if (
@@ -127,11 +128,7 @@ export function prepareContext(
 		maxNoteLength: number;
 		maxSelectionLength: number;
 		excludedPaths?: readonly string[];
-		quotes?: readonly {
-			label: string;
-			text: string;
-			limit: "note" | "selection";
-		}[];
+		quotes?: readonly ContextQuote[];
 	},
 ): PreparedContext {
 	const blocks: PromptContent[] = [];
@@ -199,6 +196,14 @@ export function prepareContext(
 			capturedAt: item.source.capturedAt,
 			scope: item.scope,
 			originalLength: exact.length,
+			...(item.scope.kind === "passage"
+				? {
+						positions: selectionPositions(
+							item.source.text,
+							item.scope.range,
+						),
+					}
+				: {}),
 		});
 	}
 	for (const quote of options.quotes ?? []) {
@@ -208,6 +213,19 @@ export function prepareContext(
 				? options.maxNoteLength
 				: options.maxSelectionLength,
 		);
+		if (quote.source) {
+			const { path, scope, capturedAt, kind } = quote.source;
+			if (!isNotePath(path))
+				throw new Error("Invalid quoted source path");
+			sources.push({
+				path,
+				scope,
+				capturedAt,
+				quoteKind: kind,
+				text,
+				originalLength: quote.text.length,
+			});
+		}
 		if (text.length !== quote.text.length)
 			notices.push(
 				`${quote.label}: truncated from ${quote.text.length} to ${text.length} UTF-16 units`,
@@ -225,6 +243,9 @@ export function prepareContext(
 			...new Set([
 				...(options.excludedPaths ?? []),
 				...items.map((item) => item.source.path),
+				...(options.quotes ?? []).flatMap((quote) =>
+					quote.source ? [quote.source.path] : [],
+				),
 			]),
 		]),
 		sources: structuredClone(sources),

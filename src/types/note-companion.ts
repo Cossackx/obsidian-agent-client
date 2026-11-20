@@ -19,6 +19,18 @@ export type ContextScope =
 	| { kind: "note" }
 	| { kind: "heading"; heading: string; occurrence: number; range: TextRange }
 	| { kind: "passage"; range: TextRange };
+export type ContextQuote = {
+	label: string;
+	text: string;
+	limit: "note" | "selection";
+	source?: {
+		path: string;
+		capturedAt: number;
+		scope: ContextScope;
+		kind: "template" | "approved-destination";
+	};
+};
+
 export interface ContextItem {
 	id: string;
 	source: SourceSnapshot;
@@ -70,6 +82,7 @@ export interface CompanionState {
 			capturedAt: number;
 			scope: ContextScope;
 			originalLength?: number;
+			quoteKind?: "template" | "approved-destination";
 			currentPath?: string;
 			positions?: { from: SourcePosition; to: SourcePosition };
 		}[];

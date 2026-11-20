@@ -1,4 +1,4 @@
-import { extractSelection } from "../utils/selection";
+import { extractSelection, normalizeLineEndings } from "../utils/selection";
 import { assertRange, headingRanges } from "./context-builder";
 import type { CompanionState, SourceSnapshot } from "../types/note-companion";
 
@@ -27,7 +27,12 @@ export function compareSource(
 				row.occurrence === scope.occurrence,
 		);
 		if (!heading) throw new Error("The previously sent heading is missing");
-		after = current.text.slice(heading.range.start, heading.range.end);
+		after = current.text.slice(
+			previous.quoteKind === "approved-destination"
+				? heading.bodyStart
+				: heading.range.start,
+			heading.range.end,
+		);
 	} else if (previous.positions) {
 		after = extractSelection(
 			current.text,
@@ -41,9 +46,17 @@ export function compareSource(
 	const truncated =
 		previous.originalLength !== undefined &&
 		previous.originalLength > previous.text.length;
-	if (truncated) after = after.slice(0, previous.text.length);
+	// Compare passages in logical editor coordinates, counting only logical
+	// line endings when matching the transmitted prefix. Whole notes and heading
+	// captures are vault bytes; do not normalize those as a write preimage.
+	const logicalPassage = scope.kind === "passage" && previous.positions;
+	const expected = logicalPassage
+		? normalizeLineEndings(previous.text)
+		: previous.text;
+	if (logicalPassage) after = normalizeLineEndings(after);
+	if (truncated) after = after.slice(0, expected.length);
 	return {
-		changed: previous.text !== after,
+		changed: expected !== after,
 		before: previous.text,
 		after,
 		truncated,

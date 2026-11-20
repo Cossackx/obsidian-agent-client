@@ -1,3 +1,4 @@
+import { readCorrelatedReply } from "../services/passage-review";
 /**
  * Sub-hook for managing chat messages, streaming, and permissions.
  *
@@ -45,7 +46,7 @@ export interface SendMessageOptions {
 	preparedContext?: PreparedContext;
 	generatedInstruction?: string;
 	approvePayload?: (blocks: readonly PromptContent[]) => Promise<boolean>;
-	collectStructuredReply?: boolean;
+	structuredRequestId?: string;
 	onConfirmed?: (
 		reply: string,
 		userMessageId: string,
@@ -70,7 +71,6 @@ export interface UseAgentMessagesReturn {
 	// Message state
 	messages: ChatMessage[];
 	isSending: boolean;
-	lastUserMessage: string | null;
 
 	// Message operations
 	sendMessage: (
@@ -119,7 +119,6 @@ export function useAgentMessages(
 
 	const [messages, setMessages] = useState<ChatMessage[]>([]);
 	const [isSending, setIsSending] = useState(false);
-	const [lastUserMessage, setLastUserMessage] = useState<string | null>(null);
 
 	// Tool call index: toolCallId → message index for O(1) lookup
 	const toolCallIndexRef = useRef<Map<string, number>>(new Map());
@@ -255,7 +254,6 @@ export function useAgentMessages(
 	const clearMessages = useCallback((): void => {
 		setMessages([]);
 		toolCallIndexRef.current.clear();
-		setLastUserMessage(null);
 		setIsSending(false);
 		setErrorInfo(null);
 	}, [setErrorInfo]);
@@ -424,12 +422,10 @@ export function useAgentMessages(
 				addMessage(userMessage);
 
 				setIsSending(true);
-				setLastUserMessage(content);
 
 				const sendPromise = (async () => {
 					const reply = { sessionId: currentSessionId, text: "" };
-					if (options.collectStructuredReply)
-						replyRef.current = reply;
+					if (options.structuredRequestId) replyRef.current = reply;
 					try {
 						const result = await sendPreparedPrompt(
 							{
@@ -449,7 +445,21 @@ export function useAgentMessages(
 
 						if (result.success) {
 							setIsSending(false);
-							setLastUserMessage(null);
+							let responseText = reply.text;
+							let correlated = false;
+							if (options.structuredRequestId) {
+								try {
+									const value = readCorrelatedReply(
+										reply.text,
+										options.structuredRequestId,
+									);
+									if (typeof value === "string")
+										responseText = value;
+									correlated = true;
+								} catch {
+									/* Unattributed discussion, never actionable. */
+								}
+							}
 							const assistantId = reply.text
 								? crypto.randomUUID()
 								: "";
@@ -458,7 +468,7 @@ export function useAgentMessages(
 									id: assistantId,
 									role: "assistant",
 									content: [
-										{ type: "text", text: reply.text },
+										{ type: "text", text: responseText },
 									],
 									timestamp: new Date(),
 								});
@@ -466,7 +476,7 @@ export function useAgentMessages(
 								options.onConfirmed?.(
 									reply.text,
 									userMessage.id,
-									assistantId,
+									correlated ? assistantId : "",
 									prepared.sources,
 								);
 							} catch {
@@ -586,7 +596,6 @@ export function useAgentMessages(
 	return {
 		messages,
 		isSending,
-		lastUserMessage,
 		sendMessage,
 		clearMessages,
 		setInitialMessages,

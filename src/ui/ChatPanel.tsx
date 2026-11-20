@@ -1,5 +1,8 @@
+import { useRestoreOwner } from "../hooks/useRestoreOwner";
+import { usePersistentEmbedRestore } from "../hooks/usePersistentEmbedRestore";
 import * as React from "react";
-const { useState, useRef, useEffect, useMemo, useCallback } = React;
+const { useState, useRef, useEffect, useLayoutEffect, useMemo, useCallback } =
+	React;
 import {
 	Notice,
 	FileSystemAdapter,
@@ -37,7 +40,7 @@ import type { AgentClientPluginSettings } from "../plugin";
 
 // Context imports
 import { useChatContext } from "./ChatContext";
-import { useNoteCompanion } from "../hooks/useNoteCompanion";
+import { useCompanionComposer } from "../hooks/useCompanionComposer";
 import type { SavedSessionInfo } from "../types/session";
 import type { ContextItem } from "../types/note-companion";
 import { ContextTray, type StructuredTurn } from "./ContextTray";
@@ -65,7 +68,10 @@ import {
 	type SessionConfigOption,
 } from "../types/session";
 import { checkAgentUpdate } from "../services/update-checker";
-import type { SessionStatus } from "../services/view-registry";
+import {
+	ConversationOwnershipError,
+	type SessionStatus,
+} from "../services/view-registry";
 import { buildGeminiDeprecationNotice } from "../services/session-helpers";
 import { PRESET_AGENTS, GEMINI_PRESET_ID } from "../services/preset-agents";
 
@@ -87,7 +93,6 @@ import type { IChatViewHost } from "./view-host";
  * Used by ChatView / FloatingViewContainer to implement IChatViewContainer
  * by delegating to the React component's state and handlers.
  */
-const EMPTY_ATTACHMENTS: AttachedFile[] = [];
 
 export interface ChatPanelCallbacks {
 	getDisplayName: () => string;
@@ -326,6 +331,22 @@ export const ChatPanel = React.memo(function ChatPanel({
 		pinnedActiveNote,
 	);
 
+	const mounted = useRef(false);
+	const publishedId = useRef(session.sessionId);
+	useLayoutEffect(() => {
+		publishedId.current = session.sessionId;
+	}, [session.sessionId]);
+	useLayoutEffect(() => {
+		mounted.current = true;
+		const untrack = plugin.viewRegistry.trackConversationOwner(
+			viewId,
+			() => publishedId.current,
+		);
+		return () => {
+			mounted.current = false;
+			untrack();
+		};
+	}, [plugin, viewId]);
 	// Session history hook with callback for session load
 	const handleSessionLoad = useCallback(
 		(
@@ -340,11 +361,64 @@ export const ChatPanel = React.memo(function ChatPanel({
 					configOptions,
 				},
 			);
+			publishedId.current = sessionId;
 			void agent.updateSessionFromLoad(sessionId, modes, configOptions);
 		},
 		[logger, agent.updateSessionFromLoad],
 	);
 
+	// ============================================================
+	// Local State
+	// ============================================================
+	const [isUpdateAvailable, setIsUpdateAvailable] = useState(false);
+
+	const composer = useCompanionComposer(session.sessionId);
+	const { companion, inputValue, attachedFiles } = composer;
+	const ownsComposer = () =>
+		composer.ownsComposer() && !changingOwner.current;
+	const updateCompanionDraft = (text: string) => {
+		if (ownsComposer()) composer.changeDraft(text);
+	};
+	const setAttachedFiles = (change: React.SetStateAction<AttachedFile[]>) => {
+		if (ownsComposer()) composer.changeFiles(change);
+	};
+	const updateDraftRef = useRef(updateCompanionDraft);
+	updateDraftRef.current = updateCompanionDraft;
+	const stageFilesRef = useRef(setAttachedFiles);
+	stageFilesRef.current = setAttachedFiles;
+	const preparingCompanion = useRef(false);
+	const changingOwner = useRef(false);
+	const busySending = useRef(isSending);
+	busySending.current = isSending;
+	const flushDraft = companion.flush;
+	const invalidateComposer = composer.invalidate;
+	const prepareRestore = useCallback(async () => {
+		if (
+			changingOwner.current ||
+			preparingCompanion.current ||
+			busySending.current
+		)
+			throw new Error(
+				"Wait for the current conversation operation to finish.",
+			);
+		changingOwner.current = true;
+		invalidateComposer();
+		const finish = () => {
+			changingOwner.current = false;
+		};
+		try {
+			await flushDraft();
+		} catch (error) {
+			finish();
+			throw error;
+		}
+		return finish;
+	}, [flushDraft, invalidateComposer]);
+	const withRestoreOwner = useRestoreOwner(
+		plugin.viewRegistry,
+		viewId,
+		prepareRestore,
+	);
 	const sessionHistory = useSessionHistory({
 		agentClient: acpClient,
 		session,
@@ -354,42 +428,9 @@ export const ChatPanel = React.memo(function ChatPanel({
 		onSessionLoad: handleSessionLoad,
 		onMessagesRestore: agent.setMessagesFromLocal,
 		onIgnoreUpdates: agent.setIgnoreUpdates,
+		withRestoreOwner,
 		onClearMessages: agent.clearMessages,
 	});
-
-	// ============================================================
-	// Local State
-	// ============================================================
-	const [isUpdateAvailable, setIsUpdateAvailable] = useState(false);
-
-	// Input state (for broadcast commands)
-	const [input, setInput] = useState<{ owner: string | null; text: string }>({
-		owner: null,
-		text: "",
-	});
-	const ownerRef = useRef(session.sessionId);
-	const ownerLease = useRef({ id: session.sessionId });
-	if (ownerLease.current.id !== session.sessionId)
-		ownerLease.current = { id: session.sessionId };
-	const lease = ownerLease.current;
-	ownerRef.current = session.sessionId;
-	const composerRevision = useRef(0);
-	const inputValue = input.owner === session.sessionId ? input.text : "";
-	const updateInput = (text: string) => {
-		if (ownerLease.current !== lease) return;
-		composerRevision.current++;
-		setInput({ owner: session.sessionId, text });
-	};
-	const companion = useNoteCompanion(session.sessionId, updateInput);
-	const updateCompanionDraft = (text: string) => {
-		if (ownerLease.current !== lease) return;
-		updateInput(text);
-		companion.setDraft(text);
-	};
-	const updateDraftRef = useRef(updateCompanionDraft);
-	updateDraftRef.current = updateCompanionDraft;
-	const preparingCompanion = useRef(false);
-	const changingOwner = useRef(false);
 	const historyOwner = useRef<SavedSessionInfo | null>(null);
 	const knownRoute = useRef<{
 		sessionId: string;
@@ -403,35 +444,10 @@ export const ChatPanel = React.memo(function ChatPanel({
 			cwd: agentCwd,
 		};
 	const [previewing, setPreviewing] = useState(false);
-	const sendEpoch = useRef(0);
-	useEffect(
-		() => () => {
-			sendEpoch.current++;
-		},
-		[session.sessionId],
-	);
 	useEffect(() => {
 		if (session.sessionId && variant === "sidebar")
 			void plugin.app.workspace.requestSaveLayout();
 	}, [session.sessionId, variant, plugin]);
-	const [staged, setStaged] = useState<{
-		owner: string | null;
-		files: AttachedFile[];
-	}>({ owner: null, files: [] });
-	const attachedFiles =
-		staged.owner === session.sessionId ? staged.files : EMPTY_ATTACHMENTS;
-	const setAttachedFiles = (change: React.SetStateAction<AttachedFile[]>) => {
-		const owner = session.sessionId;
-		if (ownerLease.current !== lease) return;
-		composerRevision.current++;
-		setStaged((old) => ({
-			owner,
-			files:
-				typeof change === "function"
-					? change(old.owner === owner ? old.files : [])
-					: change,
-		}));
-	};
 	const stageSelection = useRef<
 		Parameters<typeof plugin.registerCompanionSelection>[1]
 	>(async () => undefined);
@@ -448,7 +464,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 				"The target conversation is not ready to stage context.",
 			);
 		await plugin.companionStorage.update(id, (old) => {
-			if (ownerRef.current !== id || changingOwner.current)
+			if (!ownsComposer())
 				throw new Error(
 					"Conversation changed before staging selection",
 				);
@@ -469,8 +485,6 @@ export const ChatPanel = React.memo(function ChatPanel({
 			),
 		[plugin, viewId],
 	);
-	const stageFilesRef = useRef(setAttachedFiles);
-	stageFilesRef.current = setAttachedFiles;
 
 	// Which tool calls are expanded. Held here rather than inside the rows
 	// because the virtualized list unmounts anything scrolled out of view.
@@ -510,10 +524,8 @@ export const ChatPanel = React.memo(function ChatPanel({
 
 	// Pending auto-send queued by the pending-prompt handler (drained when ready)
 	const [pendingAutoSend, setPendingAutoSend] = useState<string | null>(null);
-	const persistRestoreAttemptedRef = useRef(false);
 	// Tracks whether we've already re-spawned the agent to match a saved
 	// conversation before restoring it (prevents a restart loop).
-	const persistRestartedRef = useRef(false);
 	// Gate the mount-init session-creation effect: run on first mount, then
 	// re-run ONLY when an explicit directive (embedded config pin or the
 	// view state's initialAgentId) names a different agent than the last
@@ -568,6 +580,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 		settings,
 		vaultPath,
 		embeddedConfig?.persist ? embeddedConfig.id : undefined,
+		isSessionReady,
 	);
 
 	const {
@@ -581,8 +594,6 @@ export const ChatPanel = React.memo(function ChatPanel({
 		handleSetConfigOption,
 		handleClearError,
 		handleClearAgentUpdate,
-		handleRestoredMessageConsumed,
-		restoredMessage,
 		agentUpdateNotification,
 		setAgentUpdateNotification,
 		autoExportIfEnabled,
@@ -631,7 +642,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 			isSending ||
 			preparingCompanion.current ||
 			changingOwner.current ||
-			ownerRef.current !== session.sessionId
+			!ownsComposer()
 		)
 			return false;
 		const snapshot = companion.state;
@@ -641,7 +652,6 @@ export const ChatPanel = React.memo(function ChatPanel({
 		}
 		preparingCompanion.current = true;
 		setPreviewing(true);
-		const epoch = sendEpoch.current;
 		const requestId = turn?.onReply ? crypto.randomUUID() : undefined;
 		try {
 			const items = [...(turn?.items ?? snapshot?.items ?? [])];
@@ -683,7 +693,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 				maxSelectionLength:
 					plugin.settings.displaySettings.maxSelectionLength,
 			});
-			if (epoch !== sendEpoch.current) return false;
+			if (!ownsComposer()) return false;
 			return await handleSendMessage(
 				turn?.intent ?? content,
 				attachments,
@@ -692,27 +702,23 @@ export const ChatPanel = React.memo(function ChatPanel({
 					generatedInstruction: requestId
 						? `${turn?.text} Wrap that exact result in this JSON object: {"requestId":${JSON.stringify(requestId)},"result":<the requested value>}. Echo the requestId verbatim and emit only that JSON object.`
 						: turn?.text,
-					collectStructuredReply:
-						requestId !== undefined || !!turn?.afterReply,
+					structuredRequestId: requestId,
 					approvePayload: async (blocks) =>
 						(await confirmPayload(
 							plugin.app,
 							blocks,
 							prepared.notices,
-						)) &&
-						epoch === sendEpoch.current &&
-						ownerRef.current === snapshot.sessionId &&
-						!changingOwner.current,
+						)) && ownsComposer(),
 					onConfirmed: (text, id, assistantId, sources) => {
 						if (sources.length)
 							void companion.confirmed(
 								{ ...prepared, sources },
 								id,
 							);
-						if (assistantId && epoch === sendEpoch.current)
-							turn?.afterReply?.(assistantId);
-						if (requestId && epoch === sendEpoch.current) {
+						if (requestId && ownsComposer()) {
 							try {
+								if (!assistantId)
+									throw new Error("Uncorrelated reply");
 								turn?.onReply?.(
 									readCorrelatedReply(text, requestId),
 									assistantId,
@@ -742,19 +748,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 		content: string,
 		attachments?: AttachedFile[],
 	) => {
-		const revision = composerRevision.current;
-		const owner = session.sessionId;
-		const ok = await sendWithCompanion(content, attachments);
-		if (
-			ok &&
-			owner === ownerRef.current &&
-			lease === ownerLease.current &&
-			revision === composerRevision.current
-		) {
-			updateDraftRef.current("");
-			stageFilesRef.current([]);
-		}
-		return ok;
+		return composer.send(() => sendWithCompanion(content, attachments));
 	};
 	const sendCurrentRef = useRef(handleSendMessageWithGeminiDismiss);
 	sendCurrentRef.current = handleSendMessageWithGeminiDismiss;
@@ -773,8 +767,8 @@ export const ChatPanel = React.memo(function ChatPanel({
 	// Sidebar-specific: handleNewChat wrapper that persists agent ID
 	// ============================================================
 	const handleNewChatWithPersist = useCallback(
-		async (requestedAgentId?: string) => {
-			await handleNewChat(requestedAgentId);
+		async (requestedAgentId?: string, forceFresh = false) => {
+			await handleNewChat(requestedAgentId, forceFresh);
 			// Persist agent ID for this view (survives Obsidian restart)
 			if (requestedAgentId) {
 				onAgentIdChanged?.(requestedAgentId);
@@ -1101,26 +1095,31 @@ export const ChatPanel = React.memo(function ChatPanel({
 		hasInitializedRef.current = true;
 		lastInitAgentRef.current = resolvedAgent;
 		if (initialConversationId) {
-			void Promise.all([
-				plugin.settingsService.loadSessionMessages(
-					initialConversationId,
-				),
-				plugin.companionStorage.load(initialConversationId),
-			])
-				.then(async ([history, saved]) => {
+			void withRestoreOwner(
+				initialConversationId,
+				async (stillMounted) => {
+					const [history, saved] = await Promise.all([
+						plugin.settingsService.loadSessionMessages(
+							initialConversationId,
+						),
+						plugin.companionStorage.load(initialConversationId),
+					]);
+					if (!stillMounted()) return;
 					if (!history && !saved) {
 						await agent.createSession(resolvedAgent);
 						return;
 					}
+					publishedId.current = initialConversationId;
 					await agent.updateSessionFromLoad(initialConversationId);
-					agent.setMessagesFromLocal(history ?? []);
-				})
-				.catch(
-					() =>
-						new Notice(
-							"Could not restore the saved conversation. Its local files were left unchanged.",
-						),
-				);
+					if (stillMounted())
+						agent.setMessagesFromLocal(history ?? []);
+				},
+			).catch(
+				() =>
+					new Notice(
+						"Could not restore the saved conversation. Its local files were left unchanged.",
+					),
+			);
 			return;
 		}
 		logger.log("[Debug] Starting connection setup via useSession...");
@@ -1132,70 +1131,22 @@ export const ChatPanel = React.memo(function ChatPanel({
 		config?.agent,
 		initialAgentId,
 		initialConversationId,
+		withRestoreOwner,
 		plugin,
 		logger,
 	]);
 
-	useEffect(() => {
-		if (variant !== "embedded") return;
-		if (!embeddedConfig?.persist || !embeddedConfig.id) return;
-		if (!isSessionReady || !session.sessionId || !session.agentId) return;
-		if (persistRestoreAttemptedRef.current) return;
-
-		// Resolve by the device-neutral embedId ALONE — not filtered by the
-		// current agent/cwd — so an unpinned block that switched agents, or one
-		// whose conversation lives under a custom "New chat in directory…" cwd,
-		// still finds its last session (#5, #11).
-		const savedSession = plugin.settingsService.getSavedSessionByEmbedId(
-			embeddedConfig.id,
-		);
-		if (!savedSession || savedSession.sessionId === session.sessionId) {
-			persistRestoreAttemptedRef.current = true;
-			return;
-		}
-
-		// restoreSession loads against the CURRENT agent process and cannot
-		// switch agents (loadSession/resumeSession run on the live connection).
-		// If the saved conversation used a different agent, re-spawn under it
-		// first (adopting its cwd), then let this effect re-run to perform the
-		// load. setAgentCwd is safe here because the mount-init effect is
-		// guarded to run once (hasInitializedRef).
-		if (
-			savedSession.agentId !== session.agentId &&
-			!persistRestartedRef.current
-		) {
-			persistRestartedRef.current = true;
-			setAgentCwd(savedSession.cwd);
-			void agent.restartSession(savedSession.agentId, savedSession.cwd);
-			return;
-		}
-
-		if (!sessionHistory.canRestore) {
-			persistRestoreAttemptedRef.current = true;
-			return;
-		}
-
-		persistRestoreAttemptedRef.current = true;
-		// Align agentCwd with the restored conversation so the cwd banner and
-		// later first-message saves reflect its real directory (restoreSession
-		// itself does not touch agentCwd). Safe under the mount-init guard.
-		setAgentCwd(savedSession.cwd);
-		void sessionHistory.restoreSession(
-			savedSession.sessionId,
-			savedSession.cwd,
-		);
-	}, [
-		variant,
-		embeddedConfig?.persist,
-		embeddedConfig?.id,
-		isSessionReady,
-		session.sessionId,
+	usePersistentEmbedRestore(
+		variant === "embedded" && embeddedConfig?.persist
+			? embeddedConfig.id
+			: undefined,
+		isSessionReady ? session.sessionId : null,
 		session.agentId,
-		sessionHistory.canRestore,
-		sessionHistory.restoreSession,
 		plugin.settingsService,
+		sessionHistory,
 		agent.restartSession,
-	]);
+		setAgentCwd,
+	);
 
 	// Apply configured model (a select config option with category "model")
 	// when session is ready.
@@ -1850,35 +1801,43 @@ export const ChatPanel = React.memo(function ChatPanel({
 			);
 			return;
 		}
-		let release: (() => void) | undefined;
-		try {
-			if (id) release = plugin.viewRegistry.reserveRestore(id, viewId);
-		} catch {
-			new Notice("This conversation already has another owner view.");
-			return;
-		}
-		changingOwner.current = true;
 		setReconnecting(true);
 		const history = messages;
 		try {
-			await companion.flush();
-			agent.setIgnoreUpdates(true);
-			await agent.forceRestartAgent(id ?? undefined, route?.cwd);
-			if (id && !acpClient.hasLiveSession(id))
-				throw new Error("Restore not confirmed");
-			if (id) agent.setMessagesFromLocal(history);
-		} catch {
-			await acpClient.disconnect().catch(() => undefined);
-			if (id) await agent.updateSessionFromLoad(id);
-			agent.setMessagesFromLocal(history);
-			new Notice(
-				"Reconnect did not restore the conversation. History remains local; nothing was resent.",
-			);
+			const restore = async (stillMounted: () => boolean) => {
+				agent.setIgnoreUpdates(true);
+				try {
+					await agent.forceRestartAgent(id ?? undefined, route?.cwd);
+					if (!stillMounted()) return;
+					if (id && !acpClient.hasLiveSession(id))
+						throw new Error("Restore not confirmed");
+					if (id) agent.setMessagesFromLocal(history);
+				} catch {
+					if (!stillMounted()) return;
+					await acpClient.disconnect().catch(() => undefined);
+					if (id && stillMounted()) {
+						publishedId.current = id;
+						await agent.updateSessionFromLoad(id);
+					}
+					if (stillMounted()) agent.setMessagesFromLocal(history);
+					throw new Error(
+						"Reconnect did not restore the conversation. History remains local; nothing was resent.",
+					);
+				} finally {
+					agent.setIgnoreUpdates(false);
+				}
+			};
+			if (id) await withRestoreOwner(id, restore);
+			else await restore(() => mounted.current);
+		} catch (error) {
+			if (mounted.current)
+				new Notice(
+					error instanceof Error
+						? error.message
+						: "Could not reconnect.",
+				);
 		} finally {
-			agent.setIgnoreUpdates(false);
-			changingOwner.current = false;
 			setReconnecting(false);
-			release?.();
 		}
 	};
 	const companionStatus = deriveCompanionStatus({
@@ -1965,7 +1924,6 @@ export const ChatPanel = React.memo(function ChatPanel({
 				key={session.sessionId ?? "unbound"}
 				companion={companion}
 				activePath={
-					settings.autoMentionActiveNote &&
 					!suggestions.mentions.isAutoMentionDisabled
 						? suggestions.mentions.activeNote?.path
 						: undefined
@@ -2006,17 +1964,20 @@ export const ChatPanel = React.memo(function ChatPanel({
 							acpClient.isInitialized(),
 						newChat: async (selected: ContextItem[]) => {
 							if (
-								ownerRef.current !== session.sessionId ||
+								!ownsComposer() ||
 								changingOwner.current ||
 								preparingCompanion.current ||
 								isSending
 							)
 								return;
 							changingOwner.current = true;
+							invalidateComposer();
 							setReconnecting(true);
 							try {
 								await companion.flush();
-								await handleNewChatWithPersist();
+								if (!mounted.current) return;
+								await handleNewChatWithPersist(undefined, true);
+								if (!mounted.current) return;
 								const id = acpClient.getConfirmedSessionId();
 								if (!id || id === session.sessionId) return;
 								if (selected.length)
@@ -2037,7 +1998,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 						},
 						open: async (saved, resume) => {
 							if (
-								ownerRef.current !== session.sessionId ||
+								!ownsComposer() ||
 								changingOwner.current ||
 								preparingCompanion.current ||
 								isSending
@@ -2047,48 +2008,55 @@ export const ChatPanel = React.memo(function ChatPanel({
 								saved.agentId === session.agentId &&
 								saved.cwd === agentCwd &&
 								acpClient.getCurrentAgentId() === saved.agentId;
-							const release =
-								resume && compatible
-									? plugin.viewRegistry.reserveRestore(
-											saved.sessionId,
-											viewId,
-										)
-									: undefined;
-							changingOwner.current = true;
 							setReconnecting(true);
 							try {
-								await companion.flush();
-								historyOwner.current = saved;
-								if (release) {
+								if (resume && compatible) {
 									try {
 										await sessionHistory.restoreSession(
 											saved.sessionId,
 											saved.cwd,
 										);
 										if (
+											!mounted.current ||
 											acpClient.hasLiveSession(
 												saved.sessionId,
 											)
 										)
 											return;
-									} catch {
+									} catch (error) {
+										if (
+											error instanceof
+											ConversationOwnershipError
+										)
+											throw error;
+										if (!mounted.current) return;
 										new Notice(
 											"Resume failed; opening local history without a connection.",
 										);
 									}
 								}
-								const history =
-									await plugin.settingsService.loadSessionMessages(
-										saved.sessionId,
-									);
-								await acpClient.disconnect();
-								await agent.updateSessionFromLoad(
+								await withRestoreOwner(
 									saved.sessionId,
+									async (stillMounted) => {
+										const history =
+											await plugin.settingsService.loadSessionMessages(
+												saved.sessionId,
+											);
+										if (!stillMounted()) return;
+										await acpClient.disconnect();
+										if (!stillMounted()) return;
+										historyOwner.current = saved;
+										publishedId.current = saved.sessionId;
+										await agent.updateSessionFromLoad(
+											saved.sessionId,
+										);
+										if (stillMounted())
+											agent.setMessagesFromLocal(
+												history ?? [],
+											);
+									},
 								);
-								agent.setMessagesFromLocal(history ?? []);
 							} finally {
-								release?.();
-								changingOwner.current = false;
 								setReconnecting(false);
 							}
 						},
@@ -2109,13 +2077,11 @@ export const ChatPanel = React.memo(function ChatPanel({
 			queuedPermissionCount={queuedPermissionCount}
 			onApprovePermission={agent.approvePermission}
 			autoMentionEnabled={settings.autoMentionActiveNote}
-			restoredMessage={restoredMessage}
 			suggestions={suggestions}
 			plugin={plugin}
 			view={viewHost}
 			onSendMessage={handleSendMessageWithGeminiDismiss}
 			onStopGeneration={handleStopGeneration}
-			onRestoredMessageConsumed={handleRestoredMessageConsumed}
 			modes={session.modes}
 			onModeChange={(modeId) => void handleSetMode(modeId)}
 			configOptions={session.configOptions}

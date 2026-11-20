@@ -1,3 +1,4 @@
+import { ConversationOwnershipError } from "../services/view-registry";
 import { useRef, useCallback, useEffect } from "react";
 import { Notice, Platform } from "obsidian";
 import { SessionHistoryModal } from "../ui/SessionHistoryModal";
@@ -69,23 +70,19 @@ export function useHistoryModal(
 		async (sessionId: string, cwd: string) => {
 			try {
 				logger.log(`[ChatPanel] Restoring session: ${sessionId}`);
-				agent.clearMessages();
 				await sessionHistory.restoreSession(sessionId, cwd);
 				onAgentCwdChange?.(
 					Platform.isWin ? convertWslPathToWindows(cwd) : cwd,
 				);
 				new Notice("[Agent Client] Session restored");
 			} catch (error) {
-				new Notice("[Agent Client] Failed to restore session");
+				if (error instanceof ConversationOwnershipError)
+					new Notice(error.message);
+				else new Notice("[Agent Client] Failed to restore session");
 				logger.error("Session restore error:", error);
 			}
 		},
-		[
-			logger,
-			agent.clearMessages,
-			sessionHistory.restoreSession,
-			onAgentCwdChange,
-		],
+		[logger, sessionHistory.restoreSession, onAgentCwdChange],
 	);
 
 	const handleForkSession = useCallback(
@@ -182,8 +179,8 @@ export function useHistoryModal(
 		historyModalRef.current.open();
 		void sessionHistory.fetchSessions(
 			sessionHistory.canList &&
-			(sessionHistory.canRestore || sessionHistory.canFork) &&
-			!filters.currentVaultOnly
+				(sessionHistory.canRestore || sessionHistory.canFork) &&
+				!filters.currentVaultOnly
 				? undefined
 				: vaultPath,
 		);

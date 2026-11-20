@@ -211,19 +211,39 @@ export interface IChatViewContainer {
 	getContainerEl(): HTMLElement;
 }
 
+export class ConversationOwnershipError extends Error {}
+
 export class ChatViewRegistry {
 	private views = new Map<string, IChatViewContainer>();
 	private restoreReservations = new Set<string>();
+	// Includes persistent embeds, which are not broadcast containers.
+	private conversationOwners = new Map<string, () => string | null>();
+
+	trackConversationOwner(
+		viewId: string,
+		getId: () => string | null,
+	): () => void {
+		this.conversationOwners.set(viewId, getId);
+		return () => {
+			if (this.conversationOwners.get(viewId) === getId)
+				this.conversationOwners.delete(viewId);
+		};
+	}
 
 	reserveRestore(sessionId: string, viewId: string): () => void {
 		if (
 			this.restoreReservations.has(sessionId) ||
+			[...this.conversationOwners].some(
+				([id, getId]) => id !== viewId && getId() === sessionId,
+			) ||
 			this.getAll().some(
 				(view) =>
 					view.viewId !== viewId && view.getSessionId() === sessionId,
 			)
 		)
-			throw new Error("This conversation already has an open owner view");
+			throw new ConversationOwnershipError(
+				"This conversation already has an open owner view",
+			);
 		this.restoreReservations.add(sessionId);
 		return () => {
 			this.restoreReservations.delete(sessionId);

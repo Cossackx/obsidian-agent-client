@@ -20,6 +20,14 @@ export function useNoteCompanion(
 	const active = useRef(sessionId);
 	active.current = sessionId;
 	const draft = useRef<{ id: string; text: string } | null>(null);
+	const draftEdit = useRef<object | null>(null);
+	const loadedOwner = useRef<{ id: string | null; restored: boolean }>({
+		id: sessionId,
+		restored: false,
+	});
+	if (loadedOwner.current.id !== sessionId)
+		loadedOwner.current = { id: sessionId, restored: false };
+	const owner = loadedOwner.current;
 	const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const revisions = useRef(new Map<string, number>());
 	const failed = useRef(
@@ -34,7 +42,7 @@ export function useNoteCompanion(
 		async (
 			id: string,
 			change: Change,
-			kind = "context",
+			kind: string,
 			retryRevision?: number,
 		) => {
 			const key = JSON.stringify([id, kind]);
@@ -86,18 +94,34 @@ export function useNoteCompanion(
 	}, [save]);
 	useEffect(() => {
 		let cancelled = false;
+		let observedSave = false;
+		const editAtLoad = draftEdit.current;
 		setState(null);
 		setWarning("");
 		if (sessionId)
 			void storage.load(sessionId).then(
 				(saved) => {
 					if (cancelled) return;
-					setState(saved ?? emptyCompanion(sessionId));
+					if (!observedSave)
+						setState(saved ?? emptyCompanion(sessionId));
 					const pendingDraft = failed.current.get(
 						JSON.stringify([sessionId, "draft"]),
 					);
-					if (pendingDraft)
-						setWarning("A draft change has not been saved.");
+					if (
+						[...failed.current.values()].some(
+							(entry) => entry.id === sessionId,
+						)
+					)
+						setWarning("A companion change has not been saved.");
+					if (
+						owner.restored ||
+						draftEdit.current !== editAtLoad ||
+						draft.current?.id === sessionId
+					) {
+						owner.restored = true;
+						return;
+					}
+					owner.restored = true;
 					restore.current(
 						pendingDraft?.change(saved ?? emptyCompanion(sessionId))
 							.draft ??
@@ -115,35 +139,48 @@ export function useNoteCompanion(
 				},
 			);
 		const off = storage.subscribe((saved) => {
-			if (!cancelled && saved.sessionId === sessionId) setState(saved);
+			if (!cancelled && saved.sessionId === sessionId) {
+				observedSave = true;
+				setState(saved);
+			}
 		});
 		return () => {
 			cancelled = true;
 			off();
 			void flush();
 		};
-	}, [sessionId, storage, flush, version]);
-	const update = (change: Change, kind?: string) =>
-		sessionId ? save(sessionId, change, kind) : Promise.resolve();
+	}, [sessionId, storage, flush, version, owner]);
+	const update = (change: Change, kind: string) =>
+		sessionId && loadedOwner.current === owner
+			? save(sessionId, change, kind)
+			: Promise.resolve();
 	return {
 		state: state?.sessionId === sessionId ? state : null,
 		warning,
 		update,
 		flush,
 		setDraft(text: string) {
-			if (!sessionId || state?.sessionId !== sessionId) return;
+			if (!sessionId || loadedOwner.current !== owner) return;
+			owner.restored = true;
+			draftEdit.current = {};
 			draft.current = { id: sessionId, text };
 			if (timer.current !== null) clearTimeout(timer.current);
 			timer.current = setTimeout(() => void flush(), 350);
 		},
 		confirmed(prepared: PreparedContext, id: string) {
-			return update((old) => {
-				if (old.sent.some((turn) => turn.id === id)) return old;
-				return {
-					...consumeSubmittedItems(old, prepared.sentItemIds),
-					sent: [...old.sent, { id, sources: prepared.sources }],
-				};
-			}, `sent:${id}`);
+			if (!sessionId) return Promise.resolve();
+			// Receipt belongs to the originating turn even if its composer closed.
+			return save(
+				sessionId,
+				(old) => {
+					if (old.sent.some((turn) => turn.id === id)) return old;
+					return {
+						...consumeSubmittedItems(old, prepared.sentItemIds),
+						sent: [...old.sent, { id, sources: prepared.sources }],
+					};
+				},
+				`sent:${id}`,
+			);
 		},
 		async refresh() {
 			if (!sessionId) return;

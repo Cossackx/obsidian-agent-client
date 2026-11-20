@@ -45,7 +45,6 @@ export interface UseAgentReturn {
 	// Message state
 	messages: ChatMessage[];
 	isSending: boolean;
-	lastUserMessage: string | null;
 
 	// Combined error
 	errorInfo: ErrorInfo | null;
@@ -181,7 +180,6 @@ export function useAgent(
 			// Message state
 			messages: agentMessages.messages,
 			isSending: agentMessages.isSending,
-			lastUserMessage: agentMessages.lastUserMessage,
 
 			// Combined error
 			errorInfo,
@@ -219,7 +217,6 @@ export function useAgent(
 			agentSession.isReady,
 			agentMessages.messages,
 			agentMessages.isSending,
-			agentMessages.lastUserMessage,
 			errorInfo,
 			agentSession.createSession,
 			agentSession.restartSession,

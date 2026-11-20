@@ -4,6 +4,7 @@ import * as React from "react";
 import { Modal, Notice, TFile, type App } from "obsidian";
 import type {
 	ContextItem,
+	ContextQuote,
 	DestinationAnchor,
 	SourceSnapshot,
 	NoteEditProposal,
@@ -43,14 +44,9 @@ import { getVaultDragFiles } from "../utils/vault-drag";
 export interface StructuredTurn {
 	text: string;
 	intent?: string;
-	quotes?: readonly {
-		label: string;
-		text: string;
-		limit: "note" | "selection";
-	}[];
+	quotes?: readonly ContextQuote[];
 	items?: readonly ContextItem[];
 	onReply?: (result: unknown, id: string) => void;
-	afterReply?: (id: string) => void;
 }
 
 function ReceiptDetails({ proposal }: { proposal: NoteEditProposal }) {
@@ -213,8 +209,25 @@ export function ContextTray({
 			})),
 		);
 		if (current.current === sessionId)
-			await update((old) => entries.reduce(putItem, old));
+			await update(
+				(old) => entries.reduce(putItem, old),
+				`add:${crypto.randomUUID()}`,
+			);
 	};
+	const editItem = (
+		id: string,
+		field: string,
+		change: Partial<ContextItem>,
+	) =>
+		update(
+			(old) => ({
+				...old,
+				items: old.items.map((row) =>
+					row.id === id ? { ...row, ...change } : row,
+				),
+			}),
+			`item:${id}:${field}`,
+		);
 	const favourites = state?.favourites ?? [];
 	const projectActions = [
 		[
@@ -254,10 +267,11 @@ export function ContextTray({
 		);
 		setSynthesis(null);
 		await send({
-			text: buildSynthesisPrompt(sources, purpose),
+			text: `${buildSynthesisPrompt(sources, purpose)} Return the synthesis as a string value.`,
 			intent: `Bring these together: ${purpose}`,
-			afterReply: (id) => {
-				if (current.current === sessionId)
+			items: sources,
+			onReply: (result, id) => {
+				if (typeof result === "string" && current.current === sessionId)
 					setSynthesis({ id, sources });
 			},
 		});
@@ -318,7 +332,7 @@ export function ContextTray({
 			}
 		}
 		if (current.current === sessionId)
-			await update((old) => putItem(old, item));
+			await update((old) => putItem(old, item), `add:${item.id}`);
 	};
 	const destination = async (kind: "note" | "range") => {
 		let target: DestinationAnchor;
@@ -372,7 +386,10 @@ export function ContextTray({
 			frozenTarget.current = null;
 		}
 		if (current.current === sessionId)
-			await update((old) => ({ ...old, destination: target }));
+			await update(
+				(old) => ({ ...old, destination: target }),
+				"destination",
+			);
 	};
 	const frozenTarget = React.useRef<{
 		source: SourceSnapshot;
@@ -544,12 +561,32 @@ export function ContextTray({
 				label: `Template: ${template.path}`,
 				text: template.text,
 				limit: "note",
+				source: {
+					path: template.path,
+					capturedAt: template.capturedAt,
+					scope: { kind: "note" },
+					kind: "template",
+				},
 			});
 		if (section && original)
 			quotes.push({
 				label: `Approved destination section: ${target.path}`,
 				text: original.text.slice(section.bodyStart, section.range.end),
 				limit: "selection",
+				source: {
+					path: original.path,
+					capturedAt: original.capturedAt,
+					scope: {
+						kind: "heading",
+						heading: section.heading,
+						occurrence: section.occurrence,
+						range: {
+							start: section.bodyStart,
+							end: section.range.end,
+						},
+					},
+					kind: "approved-destination",
+				},
 			});
 		if (current.current !== sessionId) return;
 		await send({
@@ -592,20 +629,11 @@ export function ContextTray({
 			scope = { kind: "heading", ...row };
 		}
 		if (current.current === sessionId)
-			await update((old) => ({
-				...old,
-				items: old.items.map((row) =>
-					row.id === item.id
-						? {
-								...row,
-								id: crypto.randomUUID(),
-								source,
-								scope,
-								status: undefined,
-							}
-						: row,
-				),
-			}));
+			await editItem(item.id, "capture", {
+				source,
+				scope,
+				status: undefined,
+			});
 	};
 	return (
 		<details
@@ -652,10 +680,10 @@ export function ContextTray({
 					disabled={!state}
 					onClick={() =>
 						run(() =>
-							update((old) => ({
-								...old,
-								compact: !old.compact,
-							})),
+							update(
+								(old) => ({ ...old, compact: !compact }),
+								"density",
+							),
 						)
 					}
 				>
@@ -748,9 +776,7 @@ export function ContextTray({
 										const role = event.target
 											.value as ContextItem["role"];
 										run(() =>
-											update((old) =>
-												putItem(old, { ...item, role }),
-											),
+											editItem(item.id, "role", { role }),
 										);
 									}}
 								>
@@ -765,15 +791,12 @@ export function ContextTray({
 									disabled={working || busy}
 									onClick={() =>
 										run(() =>
-											update((old) =>
-												putItem(old, {
-													...item,
-													lifetime:
-														item.lifetime === "turn"
-															? "session"
-															: "turn",
-												}),
-											),
+											editItem(item.id, "lifetime", {
+												lifetime:
+													item.lifetime === "turn"
+														? "session"
+														: "turn",
+											}),
 										)
 									}
 								>
@@ -786,8 +809,10 @@ export function ContextTray({
 									disabled={working || busy}
 									onClick={() =>
 										run(() =>
-											update((old) =>
-												moveItem(old, item.id, -1),
+											update(
+												(old) =>
+													moveItem(old, item.id, -1),
+												`move:${crypto.randomUUID()}`,
 											),
 										)
 									}
@@ -799,8 +824,10 @@ export function ContextTray({
 									disabled={working || busy}
 									onClick={() =>
 										run(() =>
-											update((old) =>
-												moveItem(old, item.id, 1),
+											update(
+												(old) =>
+													moveItem(old, item.id, 1),
+												`move:${crypto.randomUUID()}`,
 											),
 										)
 									}
@@ -823,12 +850,16 @@ export function ContextTray({
 									disabled={working || busy}
 									onClick={() =>
 										run(() =>
-											update((old) => ({
-												...old,
-												items: old.items.filter(
-													(row) => row.id !== item.id,
-												),
-											})),
+											update(
+												(old) => ({
+													...old,
+													items: old.items.filter(
+														(row) =>
+															row.id !== item.id,
+													),
+												}),
+												`remove:${item.id}`,
+											),
 										)
 									}
 								>
@@ -844,11 +875,10 @@ export function ContextTray({
 										onBlur={(event) => {
 											const annotation =
 												event.target.value;
-											void update((old) =>
-												putItem(old, {
-													...item,
-													annotation,
-												}),
+											void editItem(
+												item.id,
+												"annotation",
+												{ annotation },
 											);
 										}}
 									/>
@@ -931,17 +961,13 @@ export function ContextTray({
 																		scope.occurrence,
 															)?.range
 														: scope.kind ===
-																	"passage" &&
-															  text.slice(
-																	scope.range
-																		.start,
-																	scope.range
-																		.end,
-															  ) ===
-																	contextText(
-																		item,
-																	)
-															? scope.range
+															  "passage"
+															? mapStoredRange(
+																	item.source
+																		.text,
+																	text,
+																	scope.range,
+																)
 															: null;
 												if (
 													scope.kind !== "note" &&
@@ -1019,22 +1045,35 @@ export function ContextTray({
 										disabled={busy || working}
 										onChange={() =>
 											run(() =>
-												update((old) => ({
-													...old,
-													favourites:
-														favourites.includes(
-															label,
-														)
-															? favourites.filter(
-																	(entry) =>
-																		entry !==
-																		label,
-																)
-															: [
-																	...favourites,
-																	label,
-																],
-												})),
+												update(
+													(old) => ({
+														...old,
+														favourites:
+															favourites.includes(
+																label,
+															)
+																? (
+																		old.favourites ??
+																		[]
+																	).filter(
+																		(
+																			entry,
+																		) =>
+																			entry !==
+																			label,
+																	)
+																: [
+																		...new Set(
+																			[
+																				...(old.favourites ??
+																					[]),
+																				label,
+																			],
+																		),
+																	],
+													}),
+													`favourite:${label}`,
+												),
 											)
 										}
 									/>{" "}
@@ -1114,10 +1153,13 @@ export function ContextTray({
 									disabled={working || busy}
 									onClick={() =>
 										run(() =>
-											update((old) => ({
-												...old,
-												destination: null,
-											})),
+											update(
+												(old) => ({
+													...old,
+													destination: null,
+												}),
+												"destination",
+											),
 										)
 									}
 								>

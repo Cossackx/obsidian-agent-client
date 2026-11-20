@@ -127,6 +127,9 @@ function assertState(
 					(item: unknown) =>
 						object(item) &&
 						scope(item.scope) &&
+						(item.quoteKind === undefined ||
+							item.quoteKind === "template" ||
+							item.quoteKind === "approved-destination") &&
 						(item.currentPath === undefined ||
 							path(item.currentPath)) &&
 						(item.originalLength === undefined ||

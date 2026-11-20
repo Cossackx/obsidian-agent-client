@@ -107,8 +107,9 @@ export function useSuggestions(
 	const [activeNote, setActiveNote] = useState<NoteMetadata | null>(
 		pinnedActiveNote ?? null,
 	);
-	const [isAutoMentionDisabled, setIsAutoMentionDisabled] =
+	const [autoMentionDisabled, setIsAutoMentionDisabled] =
 		useState(!autoMentionDefault);
+	const isAutoMentionDisabled = !autoMentionDefault || autoMentionDisabled;
 
 	// Sync toggle when the setting changes at runtime (e.g. from plugin settings)
 	useEffect(() => {

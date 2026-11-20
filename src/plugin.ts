@@ -401,9 +401,7 @@ export default class AgentClientPlugin extends Plugin {
 				const id = this.viewRegistry.getFocusedId();
 				const act = id ? this.selectionHandlers.get(id) : undefined;
 				if (!act) {
-					new Notice(
-						"Open and focus the target Agent Client conversation first.",
-					);
+					new Notice("Open and focus the target conversation first.");
 					return;
 				}
 				const text = editor.getValue();
