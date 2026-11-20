@@ -94,6 +94,8 @@ export interface UseSessionHistoryOptions {
 	onSessionLoad: SessionLoadCallback;
 	/** Callback invoked when messages should be restored from local storage */
 	onMessagesRestore?: MessagesRestoreCallback;
+	/** Read the accepted transcript, only if the display still owns this ID. */
+	getCurrentTranscript?: (sessionId: string) => ChatMessage[] | null;
 	/** Control whether useMessages ignores incoming updates (for history replay suppression) */
 	onIgnoreUpdates?: (ignore: boolean) => void;
 	/** Reserve the target before changing identity, route, or ACP state. */
@@ -288,6 +290,7 @@ export function useSessionHistory(
 		onIgnoreUpdates,
 		onClearMessages,
 		withRestoreOwner,
+		getCurrentTranscript,
 	} = options;
 
 	// Derive capability flags from session.agentCapabilities
@@ -567,6 +570,9 @@ export function useSessionHistory(
 						throw new Error(
 							"The agent could not restore the exact conversation",
 						);
+					// A same-owner restore can have accepted updates after the disk read.
+					const history =
+						getCurrentTranscript?.(sessionId) ?? localMessages;
 					// Retire the outgoing transcript before publishing the new identity,
 					// in the same synchronous batch. Preferences alone may settle later.
 					onClearMessages?.();
@@ -575,11 +581,10 @@ export function useSessionHistory(
 						result.modes,
 						result.configOptions,
 					);
-					const useLocal =
-						localMessages !== null && onMessagesRestore;
+					const useLocal = history !== null && onMessagesRestore;
 					if (useLocal) onIgnoreUpdates?.(true);
 					try {
-						if (useLocal) useLocal(localMessages);
+						if (useLocal) useLocal(history);
 						result.publishUpdates?.();
 					} finally {
 						if (useLocal) onIgnoreUpdates?.(false);
@@ -601,6 +606,7 @@ export function useSessionHistory(
 			onMessagesRestore,
 			onIgnoreUpdates,
 			onClearMessages,
+			getCurrentTranscript,
 		],
 	);
 

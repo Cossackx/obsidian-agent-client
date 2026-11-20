@@ -428,6 +428,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 		agentCwd,
 		onSessionLoad: handleSessionLoad,
 		onMessagesRestore: agent.setMessagesFromLocal,
+		getCurrentTranscript: agent.getCurrentTranscript,
 		onIgnoreUpdates: agent.setIgnoreUpdates,
 		withRestoreOwner,
 		onClearMessages: agent.clearMessages,
@@ -2092,6 +2093,10 @@ export const ChatPanel = React.memo(function ChatPanel({
 										if (!stillMounted()) return;
 										await acpClient.disconnect();
 										if (!stillMounted()) return;
+										const current =
+											agent.getCurrentTranscript(
+												saved.sessionId,
+											);
 										historyOwner.current = saved;
 										publishedId.current = saved.sessionId;
 										const preferences =
@@ -2099,7 +2104,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 												saved.sessionId,
 											);
 										agent.setMessagesFromLocal(
-											history ?? [],
+											current ?? history ?? [],
 										);
 										await preferences;
 									},

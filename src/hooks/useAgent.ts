@@ -51,6 +51,7 @@ export interface UseAgentReturn {
 	isSending: boolean;
 	transcriptVersion: number;
 	takeTranscriptSnapshot: () => TranscriptSnapshot;
+	getCurrentTranscript: (sessionId: string) => ChatMessage[] | null;
 	beforeTranscriptReplacement: (
 		save: (snapshot: TranscriptSnapshot) => void,
 	) => () => void;
@@ -148,6 +149,16 @@ export function useAgent(
 		agentSession.session,
 		setErrorInfo,
 	);
+	const { getUpdateOwner } = agentSession;
+	const { takeTranscriptSnapshot } = agentMessages;
+	const getCurrentTranscript = useCallback(
+		(sessionId: string) => {
+			if (getUpdateOwner() !== sessionId) return null;
+			const { messages } = takeTranscriptSnapshot();
+			return messages.length > 0 ? messages : null;
+		},
+		[getUpdateOwner, takeTranscriptSnapshot],
+	);
 
 	// ============================================================
 	// Unified Session Update Handler
@@ -202,6 +213,7 @@ export function useAgent(
 			isSending: agentMessages.isSending,
 			transcriptVersion: agentMessages.transcriptVersion,
 			takeTranscriptSnapshot: agentMessages.takeTranscriptSnapshot,
+			getCurrentTranscript,
 			beforeTranscriptReplacement:
 				agentMessages.beforeTranscriptReplacement,
 
@@ -243,6 +255,7 @@ export function useAgent(
 			agentMessages.isSending,
 			agentMessages.transcriptVersion,
 			agentMessages.takeTranscriptSnapshot,
+			getCurrentTranscript,
 			agentMessages.beforeTranscriptReplacement,
 			errorInfo,
 			agentSession.createSession,

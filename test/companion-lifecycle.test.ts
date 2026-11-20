@@ -4,6 +4,8 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { DataAdapter } from "obsidian";
 import { useCompanionComposer } from "../src/hooks/useCompanionComposer";
+import { useAgent } from "../src/hooks/useAgent";
+import type { SessionUpdate } from "../src/types/session";
 import { useNoteCompanion } from "../src/hooks/useNoteCompanion";
 import {
 	useAgentMessages,
@@ -704,6 +706,116 @@ it("transcript replacement captures the rendered and RAF-pending parts once", as
 	]);
 	expect(painted[0].content).toEqual([{ type: "text", text: "A rendered" }]);
 });
+
+it.each(["success", "rejection"])(
+	"a same-owner restore retains a reply accepted during a stale disk read (%s)",
+	async (outcome) => {
+		const reading = deferred();
+		const release = deferred();
+		const frames: FrameRequestCallback[] = [];
+		window.requestAnimationFrame = (frame) => frames.push(frame);
+		let receive!: (update: SessionUpdate) => void;
+		const reply = (text: string) =>
+			receive({ type: "agent_message_chunk", sessionId: "A", text });
+		const publishUpdates = vi.fn(() => reply("Duplicate replay"));
+		const client = {
+			onSessionUpdate: (listener: typeof receive) => {
+				receive = listener;
+				return noop;
+			},
+			getSessionRestoreCapabilities: () => ({ load: true }),
+			loadSession: async () => {
+				if (outcome === "rejection")
+					throw new Error("Restore rejected");
+				return { sessionId: "A", publishUpdates };
+			},
+		};
+		const diskMessages = [
+			{
+				id: "stale",
+				role: "assistant",
+				content: [{ type: "text", text: "A response" }],
+				timestamp: new Date(),
+			},
+		];
+		const store = {
+			...settingsAccess,
+			getSnapshot: () => ({ customAgents: [] }),
+			subscribe,
+			loadSessionMessages: async () => {
+				reading.resolve();
+				await release.promise;
+				return diskMessages;
+			},
+		};
+		const registry = new ChatViewRegistry();
+		const view = await mount(() => {
+			const agent = useAgent(
+				client as never,
+				store as never,
+				{} as never,
+				"/test",
+				"fixture",
+			);
+			const withRestoreOwner = useRestoreOwner(
+				registry,
+				"view",
+				async () => noop,
+			);
+			const history = useSessionHistory({
+				agentClient: client as never,
+				settingsAccess: store as never,
+				session: agent.session,
+				cwd: "/test",
+				agentCwd: "/test",
+				withRestoreOwner,
+				onSessionLoad: agent.updateSessionFromLoad,
+				onMessagesRestore: agent.setMessagesFromLocal,
+				onIgnoreUpdates: agent.setIgnoreUpdates,
+				onClearMessages: agent.clearMessages,
+				getCurrentTranscript: agent.getCurrentTranscript,
+			});
+			return { agent, history };
+		});
+		const saved = vi.fn();
+		await act(async () => {
+			await view.current.agent.updateSessionFromLoad("A");
+			view.current.agent.beforeTranscriptReplacement(saved);
+			reply("A response");
+			frames.shift()?.(0);
+		});
+		const version = view.current.agent.transcriptVersion;
+		await act(async () => {
+			const restore = view.current.history.restoreSession("A", "/test");
+			await reading.promise;
+			reply(" accepted while reading");
+			expect(frames).toHaveLength(1);
+			release.resolve();
+			if (outcome === "rejection")
+				await expect(restore).rejects.toThrow("Restore rejected");
+			else await restore;
+			frames.shift()?.(0);
+		});
+		const content = [
+			{ type: "text", text: "A response accepted while reading" },
+		];
+		expect(view.current.agent.session.sessionId).toBe("A");
+		expect(view.current.agent.messages).toEqual([
+			expect.objectContaining({ content }),
+		]);
+		if (outcome === "rejection") {
+			expect(saved).not.toHaveBeenCalled();
+			expect(publishUpdates).not.toHaveBeenCalled();
+			expect(view.current.agent.transcriptVersion).toBe(version);
+		} else {
+			expect(saved.mock.calls[0]?.[0]).toEqual({
+				version,
+				messages: [expect.objectContaining({ content })],
+			});
+			expect(publishUpdates).toHaveBeenCalledTimes(1);
+		}
+	},
+);
 
 it("real synthesis callback requires a correlated reply, not a session-local old chunk", async () => {
 	const disk = fixture();
