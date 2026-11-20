@@ -6,8 +6,16 @@ import {
 	MarkdownRenderChild,
 	type MarkdownPostProcessorContext,
 	TFile,
+	MarkdownView,
 } from "obsidian";
 import * as semver from "semver";
+import {
+	CompanionStorage,
+	companionDirectory,
+} from "./services/companion-storage";
+import { renameNoteAssociation } from "./services/note-session-index";
+import { NoteActionService } from "./services/note-action-service";
+import { isNotePath } from "./services/context-builder";
 import { ChatView, VIEW_TYPE_CHAT } from "./ui/ChatView";
 import {
 	mountCodeBlockChat,
@@ -242,6 +250,8 @@ const DEFAULT_SETTINGS: AgentClientPluginSettings = {
 export default class AgentClientPlugin extends Plugin {
 	settings: AgentClientPluginSettings;
 	settingsService!: SettingsService;
+	companionStorage!: import("./services/companion-storage").CompanionStorage;
+	noteActions!: import("./services/note-action-service").NoteActionService;
 
 	/** Registry for all chat view containers (sidebar + floating) */
 	viewRegistry = new ChatViewRegistry();
@@ -281,7 +291,63 @@ export default class AgentClientPlugin extends Plugin {
 		initializeLogger(this.settings);
 
 		// Initialize settings store
+		this.companionStorage = new CompanionStorage(
+			this.app.vault.adapter,
+			companionDirectory(this.app.vault.configDir),
+		);
+		this.noteActions = new NoteActionService(
+			this.app.vault,
+			this.companionStorage,
+			(path, preimage) => {
+				const normalize = (text: string) =>
+					text
+						.split(String.fromCharCode(13, 10))
+						.join("\n")
+						.split(String.fromCharCode(13))
+						.join("\n");
+				return this.app.workspace
+					.getLeavesOfType("markdown")
+					.every(
+						({ view }) =>
+							!(view instanceof MarkdownView) ||
+							view.file?.path !== path ||
+							view.getMode() !== "source" ||
+							normalize(view.editor.getValue()) ===
+								normalize(preimage),
+					);
+			},
+		);
 		this.settingsService = createSettingsService(this.settings, this);
+		this.registerEvent(
+			this.app.vault.on("rename", (file, oldPath) => {
+				if (
+					!(file instanceof TFile) ||
+					!isNotePath(file.path) ||
+					!isNotePath(oldPath)
+				)
+					return;
+				const path = file.path;
+				const ids = new Set(
+					this.settingsService
+						.getSavedSessions()
+						.map((session) => session.sessionId),
+				);
+				for (const view of this.viewRegistry.getAll()) {
+					const id = view.getSessionId();
+					if (id) ids.add(id);
+				}
+				for (const id of ids)
+					void this.companionStorage
+						.updateExisting(id, (state) =>
+							renameNoteAssociation(state, oldPath, path),
+						)
+						.catch(() => {
+							new Notice(
+								"Note companion could not update a saved conversation after the rename.",
+							);
+						});
+			}),
+		);
 
 		// Detach stale leaves from a previous plugin instance to prevent
 		// "Attempting to register an existing view type" when Obsidian's

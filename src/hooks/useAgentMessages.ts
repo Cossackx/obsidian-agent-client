@@ -23,6 +23,8 @@ import type { ISettingsAccess } from "../services/settings-service";
 import type { ErrorInfo } from "../types/errors";
 import type { IMentionService } from "../utils/mention-parser";
 import { preparePrompt, sendPreparedPrompt } from "../services/message-sender";
+import type { PreparedContext } from "../services/context-builder";
+import type { PromptContent } from "../types/chat";
 import { extractErrorMessage } from "../utils/error-utils";
 import { Platform } from "obsidian";
 import {
@@ -40,6 +42,9 @@ import {
  * Options for sending a message.
  */
 export interface SendMessageOptions {
+	preparedContext?: PreparedContext;
+	approvePayload?: (blocks: readonly PromptContent[]) => Promise<boolean>;
+	onConfirmed?: (reply: string, userMessageId: string) => void;
 	/** Currently active note for auto-mention */
 	activeNote: NoteMetadata | null;
 	/** Vault base path for mention resolution */
@@ -124,6 +129,8 @@ export function useAgentMessages(
 	// Track the current send promise so a new sendMessage() can wait for
 	// the previous one to settle before starting (avoids interleaved sends).
 	const sendPromiseRef = useRef<Promise<void> | null>(null);
+	const preparingRef = useRef(false);
+	const replyRef = useRef<{ sessionId: string; text: string } | null>(null);
 
 	// ============================================================
 	// Streaming Update Batching
@@ -154,6 +161,12 @@ export function useAgentMessages(
 	const enqueueUpdate = useCallback(
 		(update: SessionUpdate) => {
 			if (ignoreUpdatesRef.current) return;
+			if (
+				update.type === "agent_message_chunk" &&
+				replyRef.current?.sessionId === update.sessionId
+			) {
+				replyRef.current.text += update.text;
+			}
 			// Some agents echo the prompt back as a user_message_chunk while
 			// the prompt RPC is still open; the transcript already holds it.
 			if (
@@ -285,7 +298,11 @@ export function useAgentMessages(
 
 	const sendMessage = useCallback(
 		async (content: string, options: SendMessageOptions): Promise<void> => {
-			if (!session.sessionId) {
+			if (preparingRef.current) return;
+			if (
+				!session.sessionId ||
+				!agentClient.hasLiveSession(session.sessionId)
+			) {
 				setErrorInfo({
 					title: "Cannot Send Message",
 					message: "No active session. Please wait for connection.",
@@ -296,140 +313,170 @@ export function useAgentMessages(
 			// Wait for any in-flight send to settle (e.g. after cancel/stop)
 			// before starting a new one to avoid interleaved state updates.
 			if (sendPromiseRef.current) {
-				try { await sendPromiseRef.current; } catch { /* ignore */ }
+				try {
+					await sendPromiseRef.current;
+				} catch {
+					/* ignore */
+				}
 			}
 
 			const currentSessionId = session.sessionId;
 			const generation = ++generationRef.current;
 			const settings = settingsAccess.getSnapshot();
 
-			const prepared = await preparePrompt(
-				{
-					message: content,
-					images: options.images,
-					resourceLinks: options.resourceLinks,
-					activeNote: options.activeNote,
-					vaultBasePath: options.vaultBasePath,
-					isAutoMentionDisabled: options.isAutoMentionDisabled,
-					convertToWsl: shouldConvertToWsl,
-					supportsEmbeddedContext:
-						session.promptCapabilities?.embeddedContext ?? false,
-					maxNoteLength: settings.displaySettings.maxNoteLength,
-					maxSelectionLength:
-						settings.displaySettings.maxSelectionLength,
-					isFirstMessage: options.isFirstMessage,
-					promptInjection: settings.promptInjection.enabled
-						? {
-								latex: settings.promptInjection.latex,
-								wikiLinks: settings.promptInjection.wikiLinks,
-								tables: settings.promptInjection.tables,
-							}
-						: undefined,
-					expandWikilinkContext: settings.expandWikilinkContext,
-					wikilinkResolver: vaultAccess,
-				},
-				vaultAccess,
-				vaultAccess, // IMentionService (same object)
-			);
-
-			const userMessageContent: MessageContent[] = [];
-
-			if (prepared.autoMentionContext) {
-				userMessageContent.push({
-					type: "text_with_context",
-					text: content,
-					autoMentionContext: prepared.autoMentionContext,
-				});
-			} else {
-				userMessageContent.push({
-					type: "text",
-					text: content,
-				});
-			}
-
-			if (options.images && options.images.length > 0) {
-				for (const img of options.images) {
-					userMessageContent.push({
-						type: "image",
-						data: img.data,
-						mimeType: img.mimeType,
-					});
-				}
-			}
-
-			if (options.resourceLinks && options.resourceLinks.length > 0) {
-				for (const link of options.resourceLinks) {
-					userMessageContent.push({
-						type: "resource_link",
-						uri: link.uri,
-						name: link.name,
-						mimeType: link.mimeType,
-						size: link.size,
-					});
-				}
-			}
-
-			const userMessage: ChatMessage = {
-				id: crypto.randomUUID(),
-				role: "user",
-				content: userMessageContent,
-				timestamp: new Date(),
-			};
-			addMessage(userMessage);
-
-			setIsSending(true);
-			setLastUserMessage(content);
-
-			const sendPromise = (async () => {
-				try {
-					const result = await sendPreparedPrompt(
-						{
-							sessionId: currentSessionId,
-							agentContent: prepared.agentContent,
-							displayContent: prepared.displayContent,
-							authMethods: session.authMethods,
-						},
-						agentClient,
-					);
-
-					// Discard results if a newer send has started
-					if (generationRef.current !== generation) return;
-
-					if (result.success) {
-						setIsSending(false);
-						setLastUserMessage(null);
-					} else {
-						setIsSending(false);
-						setErrorInfo(
-							result.error
-								? {
-										title: result.error.title,
-										message: result.error.message,
-										suggestion: result.error.suggestion,
-									}
-								: {
-										title: "Send Message Failed",
-										message: "Failed to send message",
-									},
-						);
-					}
-				} catch (error) {
-					if (generationRef.current !== generation) return;
-					setIsSending(false);
-					setErrorInfo({
-						title: "Send Message Failed",
-						message: `Failed to send message: ${extractErrorMessage(error)}`,
-					});
-				}
-			})();
-
-			sendPromiseRef.current = sendPromise;
+			preparingRef.current = true;
 			try {
-				await sendPromise;
-			} catch {
-				// Error already handled inside sendPromise
+				const prepared = await preparePrompt(
+					{
+						message: content,
+						preparedContext: options.preparedContext,
+						images: options.images,
+						resourceLinks: options.resourceLinks,
+						activeNote: options.activeNote,
+						vaultBasePath: options.vaultBasePath,
+						isAutoMentionDisabled: options.isAutoMentionDisabled,
+						convertToWsl: shouldConvertToWsl,
+						supportsEmbeddedContext:
+							session.promptCapabilities?.embeddedContext ??
+							false,
+						maxNoteLength: settings.displaySettings.maxNoteLength,
+						maxSelectionLength:
+							settings.displaySettings.maxSelectionLength,
+						isFirstMessage: options.isFirstMessage,
+						promptInjection: settings.promptInjection.enabled
+							? {
+									latex: settings.promptInjection.latex,
+									wikiLinks:
+										settings.promptInjection.wikiLinks,
+									tables: settings.promptInjection.tables,
+								}
+							: undefined,
+						expandWikilinkContext: settings.expandWikilinkContext,
+						wikilinkResolver: vaultAccess,
+					},
+					vaultAccess,
+					vaultAccess, // IMentionService (same object)
+				);
+				if (
+					options.approvePayload &&
+					!(await options.approvePayload(prepared.agentContent))
+				)
+					return;
+				if (
+					!agentClient.hasLiveSession(currentSessionId) ||
+					generation !== generationRef.current
+				)
+					return;
+
+				const userMessageContent: MessageContent[] = [];
+
+				if (prepared.autoMentionContext) {
+					userMessageContent.push({
+						type: "text_with_context",
+						text: content,
+						autoMentionContext: prepared.autoMentionContext,
+					});
+				} else {
+					userMessageContent.push({
+						type: "text",
+						text: content,
+					});
+				}
+
+				if (options.images && options.images.length > 0) {
+					for (const img of options.images) {
+						userMessageContent.push({
+							type: "image",
+							data: img.data,
+							mimeType: img.mimeType,
+						});
+					}
+				}
+
+				if (options.resourceLinks && options.resourceLinks.length > 0) {
+					for (const link of options.resourceLinks) {
+						userMessageContent.push({
+							type: "resource_link",
+							uri: link.uri,
+							name: link.name,
+							mimeType: link.mimeType,
+							size: link.size,
+						});
+					}
+				}
+
+				const userMessage: ChatMessage = {
+					id: crypto.randomUUID(),
+					role: "user",
+					content: userMessageContent,
+					timestamp: new Date(),
+				};
+				addMessage(userMessage);
+
+				setIsSending(true);
+				setLastUserMessage(content);
+
+				const sendPromise = (async () => {
+					const reply = { sessionId: currentSessionId, text: "" };
+					replyRef.current = reply;
+					try {
+						const result = await sendPreparedPrompt(
+							{
+								sessionId: currentSessionId,
+								agentContent: prepared.agentContent,
+								displayContent: prepared.displayContent,
+								authMethods: options.approvePayload
+									? []
+									: session.authMethods,
+								strictCompletion: !!options.approvePayload,
+							},
+							agentClient,
+						);
+
+						// Discard results if a newer send has started
+						if (generationRef.current !== generation) return;
+
+						if (result.success) {
+							setIsSending(false);
+							setLastUserMessage(null);
+							options.onConfirmed?.(reply.text, userMessage.id);
+						} else {
+							setIsSending(false);
+							setErrorInfo(
+								result.error
+									? {
+											title: result.error.title,
+											message: result.error.message,
+											suggestion: result.error.suggestion,
+										}
+									: {
+											title: "Send Message Failed",
+											message: "Failed to send message",
+										},
+							);
+						}
+					} catch (error) {
+						if (generationRef.current !== generation) return;
+						setIsSending(false);
+						setErrorInfo({
+							title: "Send Message Failed",
+							message: `Failed to send message: ${extractErrorMessage(error)}`,
+						});
+					} finally {
+						if (replyRef.current === reply) replyRef.current = null;
+					}
+				})();
+
+				sendPromiseRef.current = sendPromise;
+				try {
+					await sendPromise;
+				} catch {
+					// Error already handled inside sendPromise
+				} finally {
+					sendPromiseRef.current = null;
+				}
 			} finally {
-				sendPromiseRef.current = null;
+				preparingRef.current = false;
 			}
 		},
 		[

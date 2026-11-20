@@ -37,6 +37,15 @@ import type { AgentClientPluginSettings } from "../plugin";
 
 // Context imports
 import { useChatContext } from "./ChatContext";
+import { useNoteCompanion } from "../hooks/useNoteCompanion";
+import { ContextTray, type StructuredTurn } from "./ContextTray";
+import { confirmPayload } from "./ContextPreviewModal";
+import { prepareContext } from "../services/context-builder";
+import {
+	companionStatusLabel,
+	deriveCompanionStatus,
+} from "../services/companion-presentation";
+import { openNoteSessionPicker } from "./NoteSessionPicker";
 
 // Hooks imports
 import { useSettingsSelector } from "../hooks/useSettings";
@@ -123,6 +132,7 @@ export interface ChatPanelProps {
 	onFloatingHeaderMouseDown?: (e: React.MouseEvent) => void;
 	// Sidebar-specific: Obsidian view host for DOM event registration
 	viewHost?: IChatViewHost;
+	initialConversationId?: string;
 	/** External container element for focus tracking (floating uses parent's container) */
 	containerEl?: HTMLElement | null;
 }
@@ -217,6 +227,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 	onOpenNewWindow,
 	onFloatingHeaderMouseDown,
 	viewHost: viewHostProp,
+	initialConversationId,
 	containerEl: containerElProp,
 }: ChatPanelProps) {
 	// ============================================================
@@ -271,11 +282,15 @@ export const ChatPanel = React.memo(function ChatPanel({
 
 	const {
 		session,
-		isReady: isSessionReady,
+		isReady: agentReady,
 		messages,
 		isSending,
 		errorInfo,
 	} = agent;
+	const isSessionReady =
+		agentReady &&
+		!!session.sessionId &&
+		acpClient.hasLiveSession(session.sessionId);
 
 	const pinnedActiveNote = useMemo<NoteMetadata | null>(() => {
 		if (
@@ -343,6 +358,26 @@ export const ChatPanel = React.memo(function ChatPanel({
 
 	// Input state (for broadcast commands)
 	const [inputValue, setInputValue] = useState("");
+	const companion = useNoteCompanion(session.sessionId, setInputValue);
+	const updateCompanionDraft = (text: string) => {
+		setInputValue(text);
+		companion.setDraft(text);
+	};
+	const updateDraftRef = useRef(updateCompanionDraft);
+	updateDraftRef.current = updateCompanionDraft;
+	const preparingCompanion = useRef(false);
+	const [previewing, setPreviewing] = useState(false);
+	const sendEpoch = useRef(0);
+	useEffect(
+		() => () => {
+			sendEpoch.current++;
+		},
+		[session.sessionId],
+	);
+	useEffect(() => {
+		if (session.sessionId && variant === "sidebar")
+			void plugin.app.workspace.requestSaveLayout();
+	}, [session.sessionId, variant, plugin]);
 	const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
 
 	// Which tool calls are expanded. Held here rather than inside the rows
@@ -493,13 +528,91 @@ export const ChatPanel = React.memo(function ChatPanel({
 
 	// Wrap send so the Gemini notice also dismisses on send, mirroring how
 	// useChatActions clears agentUpdateNotification inside handleSendMessage.
-	const handleSendMessageWithGeminiDismiss = useCallback(
-		(content: string, attachments?: AttachedFile[]) => {
-			setGeminiNoticeDismissed(true);
-			return handleSendMessage(content, attachments);
-		},
-		[handleSendMessage],
-	);
+	const sendWithCompanion = async (
+		content: string,
+		attachments?: AttachedFile[],
+		turn?: StructuredTurn,
+	) => {
+		setGeminiNoticeDismissed(true);
+		if (!isSessionReady || isSending || preparingCompanion.current)
+			return false;
+		const snapshot = companion.state;
+		if (!snapshot) {
+			new Notice("Wait for the companion state to load before sending.");
+			return false;
+		}
+		preparingCompanion.current = true;
+		setPreviewing(true);
+		const epoch = sendEpoch.current;
+		try {
+			const items = [...(turn?.items ?? snapshot?.items ?? [])];
+			if (snapshot?.destination)
+				items.push({
+					id: "destination",
+					role: "destination",
+					lifetime: "session",
+					scope: { kind: "note" },
+					source: {
+						path: snapshot.destination.path,
+						text: "",
+						capturedAt: 0,
+					},
+				});
+			const assessed = await Promise.all(
+				items.map(async (item) => {
+					if (item.role === "destination") return item;
+					try {
+						const text = await vaultService.readNote(
+							item.source.path,
+						);
+						return text === item.source.text
+							? item
+							: { ...item, status: "changed" as const };
+					} catch {
+						return { ...item, status: "missing" as const };
+					}
+				}),
+			);
+			const prepared = prepareContext(assessed, {
+				embeddedContext:
+					session.promptCapabilities?.embeddedContext ?? false,
+				maxNoteLength: plugin.settings.displaySettings.maxNoteLength,
+				maxSelectionLength:
+					plugin.settings.displaySettings.maxSelectionLength,
+			});
+			if (epoch !== sendEpoch.current) return false;
+			return await handleSendMessage(content, attachments, {
+				preparedContext: prepared,
+				approvePayload: async (blocks) =>
+					(await confirmPayload(
+						plugin.app,
+						blocks,
+						prepared.notices,
+					)) && epoch === sendEpoch.current,
+				onConfirmed: (text, id) => {
+					if (prepared.sources.length)
+						void companion.confirmed(prepared, id);
+					turn?.onReply?.(text, id);
+				},
+			});
+		} catch (error) {
+			new Notice(
+				error instanceof Error
+					? error.message
+					: "The turn did not complete; no automatic retry was made.",
+			);
+			return false;
+		} finally {
+			preparingCompanion.current = false;
+			setPreviewing(false);
+		}
+	};
+	const handleSendMessageWithGeminiDismiss = (
+		content: string,
+		attachments?: AttachedFile[],
+	) => sendWithCompanion(content, attachments);
+	const sendCurrentRef = useRef(sendWithCompanion);
+	sendCurrentRef.current = sendWithCompanion;
 
 	const { handleOpenHistory } = useHistoryModal(
 		plugin,
@@ -842,9 +955,41 @@ export const ChatPanel = React.memo(function ChatPanel({
 			getDefaultAgentId(plugin.settingsService.getSnapshot());
 		hasInitializedRef.current = true;
 		lastInitAgentRef.current = resolvedAgent;
+		if (initialConversationId) {
+			void Promise.all([
+				plugin.settingsService.loadSessionMessages(
+					initialConversationId,
+				),
+				plugin.companionStorage.load(initialConversationId),
+			])
+				.then(async ([history, saved]) => {
+					if (!history && !saved) {
+						await agent.createSession(resolvedAgent);
+						return;
+					}
+					await agent.updateSessionFromLoad(initialConversationId);
+					agent.setMessagesFromLocal(history ?? []);
+				})
+				.catch(
+					() =>
+						new Notice(
+							"Could not restore the saved conversation. Its local files were left unchanged.",
+						),
+				);
+			return;
+		}
 		logger.log("[Debug] Starting connection setup via useSession...");
 		void agent.createSession(resolvedAgent);
-	}, [agent.createSession, config?.agent, initialAgentId]);
+	}, [
+		agent.createSession,
+		agent.updateSessionFromLoad,
+		agent.setMessagesFromLocal,
+		config?.agent,
+		initialAgentId,
+		initialConversationId,
+		plugin,
+		logger,
+	]);
 
 	useEffect(() => {
 		if (variant !== "embedded") return;
@@ -1295,7 +1440,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 			viewId,
 			(prompt, autoSend) => {
 				if (typeof prompt !== "string" || prompt.length === 0) return;
-				setInputValue(prompt);
+				updateDraftRef.current(prompt);
 				// Injected prompts are a fresh message — don't carry over any
 				// attachments already staged in this panel (#341/#6).
 				setAttachedFiles([]);
@@ -1310,19 +1455,22 @@ export const ChatPanel = React.memo(function ChatPanel({
 	useEffect(() => {
 		if (!pendingAutoSend) return;
 		if (!isSessionReady) return;
+		if (!companion.state) return;
 		if (isSending) return;
 		if (sessionHistory.loading) return;
 
 		const prompt = pendingAutoSend;
 		setPendingAutoSend(null);
-		setInputValue("");
-		void handleSendMessage(prompt);
+		void sendCurrentRef.current(prompt).then((confirmed) => {
+			if (confirmed && inputValueRef.current === prompt)
+				updateDraftRef.current("");
+		});
 	}, [
 		pendingAutoSend,
+		companion.state,
 		isSessionReady,
 		isSending,
 		sessionHistory.loading,
-		handleSendMessage,
 	]);
 
 	// ============================================================
@@ -1361,7 +1509,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 	const sessionIdRef = useRef(session.sessionId);
 	const hasActivePermissionRef = useRef(agent.hasActivePermission);
 	const sessionHistoryLoadingRef = useRef(sessionHistory.loading);
-	const handleSendMessageRef = useRef(handleSendMessage);
+
 	inputValueRef.current = inputValue;
 	attachedFilesRef.current = attachedFiles;
 	isSessionReadyRef.current = isSessionReady;
@@ -1370,7 +1518,6 @@ export const ChatPanel = React.memo(function ChatPanel({
 	sessionIdRef.current = session.sessionId;
 	hasActivePermissionRef.current = agent.hasActivePermission;
 	sessionHistoryLoadingRef.current = sessionHistory.loading;
-	handleSendMessageRef.current = handleSendMessage;
 
 	useEffect(() => {
 		onRegisterCallbacks?.({
@@ -1382,7 +1529,8 @@ export const ChatPanel = React.memo(function ChatPanel({
 				if (hasActivePermissionRef.current) return "permission";
 				if (isSendingRef.current || sessionHistoryLoadingRef.current)
 					return "busy";
-				if (state === "ready") return "ready";
+				if (state === "ready")
+					return isSessionReadyRef.current ? "ready" : "disconnected";
 				return "busy";
 			},
 			getSessionTitle: () =>
@@ -1397,7 +1545,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 				files: attachedFilesRef.current,
 			}),
 			setInputState: (state) => {
-				setInputValue(state.text);
+				updateDraftRef.current(state.text);
 				setAttachedFiles(state.files);
 			},
 			canSend: () => {
@@ -1428,15 +1576,23 @@ export const ChatPanel = React.memo(function ChatPanel({
 					return false;
 				}
 
-				// Clear input before sending
+				// Keep the draft and attachments unless the exact turn completes.
 				const messageToSend = currentInput.trim();
 				const filesToSend =
 					currentFiles.length > 0 ? [...currentFiles] : undefined;
-				setInputValue("");
-				setAttachedFiles([]);
-
-				await handleSendMessageRef.current(messageToSend, filesToSend);
-				return true;
+				const confirmed = await sendCurrentRef.current(
+					messageToSend,
+					filesToSend,
+				);
+				if (
+					confirmed &&
+					inputValueRef.current === currentInput &&
+					attachedFilesRef.current === currentFiles
+				) {
+					updateDraftRef.current("");
+					setAttachedFiles([]);
+				}
+				return confirmed;
 			},
 			cancelOperation: async () => {
 				if (isSendingRef.current) {
@@ -1538,6 +1694,154 @@ export const ChatPanel = React.memo(function ChatPanel({
 		/>
 	);
 
+	const [reconnecting, setReconnecting] = useState(false);
+	const reconnect = async () => {
+		if (reconnecting || preparingCompanion.current || isSending) return;
+		setReconnecting(true);
+		const id = session.sessionId;
+		const history = messages;
+		companion.flush();
+		try {
+			await agent.forceRestartAgent();
+			if (!id) return;
+			const cap = acpClient.getSessionRestoreCapabilities();
+			agent.setIgnoreUpdates(true);
+			const result = cap.load
+				? await acpClient.loadSession(id, agentCwd)
+				: cap.resume
+					? await acpClient.resumeSession(id, agentCwd)
+					: null;
+			if (!result) await acpClient.disconnect();
+			await agent.updateSessionFromLoad(
+				id,
+				result?.modes,
+				result?.configOptions,
+			);
+			agent.setMessagesFromLocal(history);
+			if (!result)
+				new Notice(
+					"This agent does not support resume. History and draft remain local; start a new conversation to send.",
+				);
+		} catch {
+			await acpClient.disconnect().catch(() => undefined);
+			if (id) await agent.updateSessionFromLoad(id);
+			agent.setMessagesFromLocal(history);
+			new Notice(
+				"Reconnect did not restore the conversation. Nothing was resent.",
+			);
+		} finally {
+			agent.setIgnoreUpdates(false);
+			setReconnecting(false);
+		}
+	};
+	const companionStatus = deriveCompanionStatus({
+		connected: isSessionReady,
+		busy: isSending,
+		pendingPermission: agent.hasActivePermission,
+		hasHistory: messages.length > 0 || !!session.sessionId,
+		initializing:
+			reconnecting ||
+			session.state === "initializing" ||
+			sessionHistory.loading,
+		error: errorInfo?.title,
+	});
+	const companionElement = (
+		<>
+			<div className="xo-note-status" role="status">
+				<span>{companionStatusLabel[companionStatus]}</span>
+				<span title={session.agentInfo?.name ?? activeAgentLabel}>
+					{session.agentInfo?.name && isSessionReady
+						? `Agent: ${session.agentInfo.name}`
+						: `Configured: ${activeAgentLabel}`}
+				</span>
+			</div>
+			<details className="xo-note-connection">
+				<summary>Connection details</summary>
+				<p>
+					Configured: {activeAgentLabel}. Runtime reports:{" "}
+					{isSessionReady
+						? (session.agentInfo?.name ?? "not reported")
+						: "not connected"}
+					. An adapter name is not proof of a loaded profile.
+				</p>
+				<div className="xo-note-row">
+					<button
+						type="button"
+						disabled={previewing || reconnecting || isSending}
+						onClick={() => void reconnect()}
+					>
+						Reconnect
+					</button>
+					{viewHost.showInEditorTab && (
+						<button
+							type="button"
+							onClick={() => {
+								companion.flush();
+								void viewHost
+									.showInEditorTab?.()
+									.catch(
+										() =>
+											new Notice(
+												"Could not move the conversation",
+											),
+									);
+							}}
+						>
+							Move to editor tab
+						</button>
+					)}
+				</div>
+			</details>
+			<ContextTray
+				companion={companion}
+				messages={messages}
+				canSend={isSessionReady && !reconnecting}
+				busy={
+					previewing ||
+					isSending ||
+					reconnecting ||
+					sessionHistory.loading
+				}
+				send={(turn) => sendWithCompanion(turn.text, undefined, turn)}
+				openContinuity={async () => {
+					const path =
+						(await vaultService.getActiveNote())?.path ??
+						companion.state?.destination?.path;
+					if (!path)
+						throw new Error(
+							"Open a Markdown note to find its conversations.",
+						);
+					await openNoteSessionPicker(plugin, path, {
+						canResume: (saved) =>
+							saved.agentId === session.agentId &&
+							sessionHistory.canRestore &&
+							acpClient.isInitialized(),
+						newChat: async () => {
+							companion.flush();
+							await handleNewChatWithPersist();
+						},
+						open: async (saved, resume) => {
+							companion.flush();
+							if (resume) {
+								await sessionHistory.restoreSession(
+									saved.sessionId,
+									saved.cwd,
+								);
+								return;
+							}
+							const history =
+								await plugin.settingsService.loadSessionMessages(
+									saved.sessionId,
+								);
+							await acpClient.disconnect();
+							await agent.updateSessionFromLoad(saved.sessionId);
+							agent.setMessagesFromLocal(history ?? []);
+						},
+					});
+				}}
+			/>
+		</>
+	);
 	const inputAreaElement = (
 		<InputArea
 			isSending={isSending}
@@ -1567,7 +1871,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 			agentId={session.agentId}
 			// Controlled component props (for broadcast commands)
 			inputValue={inputValue}
-			onInputChange={setInputValue}
+			onInputChange={updateCompanionDraft}
 			attachedFiles={attachedFiles}
 			onAttachedFilesChange={setAttachedFiles}
 			// Error overlay props
@@ -1602,6 +1906,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 					<div className="agent-client-floating-messages-container">
 						{messageListElement}
 					</div>
+					{companionElement}
 					{inputAreaElement}
 				</div>
 			</div>
@@ -1623,6 +1928,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 				<div className="agent-client-embedded-messages-container">
 					{messageListElement}
 				</div>
+				{companionElement}
 				{inputAreaElement}
 			</div>
 		);
@@ -1639,6 +1945,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 			{cwdBanner}
 			{planStrip}
 			{messageListElement}
+			{companionElement}
 			{inputAreaElement}
 		</div>
 	);

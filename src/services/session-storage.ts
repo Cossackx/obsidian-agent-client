@@ -253,6 +253,7 @@ export class SessionStorage {
 				savedSessions: sessions,
 			});
 			await this.deleteSessionMessages(sessionId);
+			await this.plugin.companionStorage?.remove(sessionId);
 		});
 	}
 

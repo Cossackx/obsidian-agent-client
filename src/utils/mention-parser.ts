@@ -145,10 +145,12 @@ export function extractMentionedNotes(
 		}
 		seen.add(noteTitle);
 
-		// Find the file by basename
-		const file = noteMentionService
-			.getAllFiles()
-			.find((f: TFile) => f.basename === noteTitle);
+		const files = noteMentionService.getAllFiles();
+		const exact = files.find((f: TFile) => f.path === noteTitle);
+		const byName = exact
+			? []
+			: files.filter((f: TFile) => f.basename === noteTitle);
+		const file = exact ?? (byName.length === 1 ? byName[0] : undefined);
 
 		result.push({ noteTitle, file });
 	}

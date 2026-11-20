@@ -1,4 +1,5 @@
 import { spawn, ChildProcess } from "child_process";
+import { Readable, Writable } from "stream";
 import * as acp from "@agentclientprotocol/sdk";
 import { Platform } from "obsidian";
 
@@ -82,6 +83,8 @@ export class AcpClient {
 	private currentConfig: AgentConfig | null = null;
 	private isInitializedFlag = false;
 	private currentAgentId: string | null = null;
+	private confirmedSessionId: string | null = null;
+	private capabilities: InitializeResult["agentCapabilities"];
 	private currentSessionId: string | null = null;
 
 	// Callbacks (none — all events flow through onSessionUpdate via AcpHandler)
@@ -398,24 +401,19 @@ export class AcpClient {
 		const stdin = agentProcess.stdin;
 		const stdout = agentProcess.stdout;
 
-		const input = new WritableStream<Uint8Array>({
-			write(chunk: Uint8Array) {
-				stdin.write(chunk);
-			},
-			close() {
-				stdin.end();
-			},
-		});
-		const output = new ReadableStream<Uint8Array>({
-			start(controller) {
-				stdout.on("data", (chunk: Uint8Array) => {
-					controller.enqueue(chunk);
-				});
-				stdout.on("end", () => {
-					controller.close();
-				});
-			},
-		});
+		// Node's adapters own EOF, abort, cancellation and backpressure. The
+		// SDK can cancel the reader before stdout closes during disconnect.
+		// The project's Node typings predate the Web-stream adapters in Electron.
+		const input = (
+			Writable as unknown as {
+				toWeb(stream: Writable): WritableStream<Uint8Array>;
+			}
+		).toWeb(stdin);
+		const output = (
+			Readable as unknown as {
+				toWeb(stream: Readable): ReadableStream<Uint8Array>;
+			}
+		).toWeb(stdout);
 
 		this.logger.log(
 			"[AcpClient] Using working directory:",
@@ -493,7 +491,9 @@ export class AcpClient {
 			this.isInitializedFlag = true;
 			this.currentAgentId = config.id;
 
-			return AcpTypeConverter.toInitializeResult(initResult);
+			const result = AcpTypeConverter.toInitializeResult(initResult);
+			this.capabilities = result.agentCapabilities;
+			return result;
 		}
 	}
 
@@ -547,7 +547,9 @@ export class AcpClient {
 				response.sessionId,
 				response,
 			);
-			this.currentSessionId = result.sessionId;
+			if (this.connection !== connection || connection.signal.aborted)
+				throw new Error("Connection changed while opening a session");
+			this.currentSessionId = this.confirmedSessionId = result.sessionId;
 			return result;
 		} catch (error) {
 			this.logger.error("[AcpClient] New Session Error:", error);
@@ -577,6 +579,7 @@ export class AcpClient {
 	async sendPrompt(
 		sessionId: string,
 		content: PromptContent[],
+		strictCompletion = false,
 	): Promise<void> {
 		const connection = this.requireConnection();
 
@@ -604,6 +607,10 @@ export class AcpClient {
 			this.logger.log(
 				`[AcpClient] Agent completed with: ${promptResult.stopReason}`,
 			);
+			if (strictCompletion && promptResult.stopReason !== "end_turn")
+				throw new Error(
+					`Turn did not complete: ${promptResult.stopReason}`,
+				);
 
 			// Detect silent failures: agent returned end_turn but sent no content.
 			// Only surface an error when stderr contains a recognized error pattern
@@ -631,7 +638,10 @@ export class AcpClient {
 				}
 			}
 		} catch (error: unknown) {
-			if (isEmptyResponseError(error) || isUserAbortedError(error)) {
+			if (
+				!strictCompletion &&
+				(isEmptyResponseError(error) || isUserAbortedError(error))
+			) {
 				return;
 			}
 			this.logger.error("[AcpClient] Prompt Error:", error);
@@ -738,6 +748,8 @@ export class AcpClient {
 		this.isInitializedFlag = false;
 		this.currentAgentId = null;
 		this.currentSessionId = null;
+		this.confirmedSessionId = null;
+		this.capabilities = undefined;
 		this.stopping = Promise.resolve()
 			.then(async () => {
 				try {
@@ -773,6 +785,24 @@ export class AcpClient {
 	 */
 	getCurrentAgentId(): string | null {
 		return this.currentAgentId;
+	}
+
+	hasLiveSession(sessionId: string): boolean {
+		return (
+			this.isInitialized() &&
+			this.currentSessionId === sessionId &&
+			this.confirmedSessionId === sessionId
+		);
+	}
+
+	getSessionRestoreCapabilities(): { load: boolean; resume: boolean } {
+		return {
+			load:
+				this.isInitialized() && this.capabilities?.loadSession === true,
+			resume:
+				this.isInitialized() &&
+				this.capabilities?.sessionCapabilities?.resume !== undefined,
+		};
 	}
 
 	/**
@@ -975,6 +1005,7 @@ export class AcpClient {
 		const connection = this.requireConnection();
 
 		// Set sessionId before await so replay updates pass the sessionId filter
+		this.confirmedSessionId = null;
 		this.currentSessionId = sessionId;
 
 		try {
@@ -991,7 +1022,9 @@ export class AcpClient {
 				sessionId,
 				response,
 			);
-			this.currentSessionId = result.sessionId;
+			if (this.connection !== connection || connection.signal.aborted)
+				throw new Error("Connection changed while opening a session");
+			this.currentSessionId = this.confirmedSessionId = result.sessionId;
 			return result;
 		} catch (error) {
 			this.logger.error("[AcpClient] Load Session Error:", error);
@@ -1015,6 +1048,7 @@ export class AcpClient {
 		const connection = this.requireConnection();
 
 		// Set sessionId before await so any updates pass the sessionId filter
+		this.confirmedSessionId = null;
 		this.currentSessionId = sessionId;
 
 		try {
@@ -1031,7 +1065,9 @@ export class AcpClient {
 				sessionId,
 				response,
 			);
-			this.currentSessionId = result.sessionId;
+			if (this.connection !== connection || connection.signal.aborted)
+				throw new Error("Connection changed while opening a session");
+			this.currentSessionId = this.confirmedSessionId = result.sessionId;
 			return result;
 		} catch (error) {
 			this.logger.error("[AcpClient] Resume Session Error:", error);
@@ -1067,7 +1103,9 @@ export class AcpClient {
 				response.sessionId,
 				response,
 			);
-			this.currentSessionId = result.sessionId;
+			if (this.connection !== connection || connection.signal.aborted)
+				throw new Error("Connection changed while opening a session");
+			this.currentSessionId = this.confirmedSessionId = result.sessionId;
 			return result;
 		} catch (error) {
 			this.logger.error("[AcpClient] Fork Session Error:", error);

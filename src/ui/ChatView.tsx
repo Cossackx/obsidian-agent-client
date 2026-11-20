@@ -66,6 +66,7 @@ function ChatComponent({
 				// later setState re-renders this component, so the prop stays
 				// current without a subscription.
 				initialAgentId={view.getInitialAgentId() ?? undefined}
+				initialConversationId={view.getConversationId() ?? undefined}
 				viewHost={view}
 				onRegisterCallbacks={(callbacks) =>
 					view.setCallbacks(callbacks)
@@ -80,10 +81,17 @@ function ChatComponent({
 /** State stored for view persistence */
 interface ChatViewState extends Record<string, unknown> {
 	initialAgentId?: string;
+	forwardFrom?: string;
+	conversationId?: string;
 }
 
 export class ChatView extends ItemView implements IChatViewContainer {
 	private root: Root | null = null;
+	private mountEl: HTMLElement | null = null;
+	private projection: ChatView | null = null;
+	private forwardFrom: string | null = null;
+	private origin: ChatView | null = null;
+	private conversationId: string | null = null;
 	private plugin: AgentClientPlugin;
 	private logger: Logger;
 	/** Unique identifier for this view instance (for multi-session support) */
@@ -120,7 +128,7 @@ export class ChatView extends ItemView implements IChatViewContainer {
 
 	getDisplayText() {
 		// Tab title == Session Manager title; fallback lives in getSessionTitle().
-		return this.getSessionTitle();
+		return this.origin?.getSessionTitle() ?? this.getSessionTitle();
 	}
 
 	getIcon() {
@@ -133,6 +141,10 @@ export class ChatView extends ItemView implements IChatViewContainer {
 	getState(): ChatViewState {
 		return {
 			initialAgentId: this.initialAgentId ?? undefined,
+			forwardFrom: this.forwardFrom ?? undefined,
+			conversationId: this.forwardFrom
+				? undefined
+				: (this.getSessionId() ?? this.conversationId ?? undefined),
 		};
 	}
 
@@ -148,8 +160,34 @@ export class ChatView extends ItemView implements IChatViewContainer {
 		result: { history: boolean },
 	): Promise<void> {
 		this.initialAgentId = state.initialAgentId ?? null;
+		this.forwardFrom =
+			typeof state.forwardFrom === "string" ? state.forwardFrom : null;
+		this.conversationId =
+			typeof state.conversationId === "string"
+				? state.conversationId
+				: null;
 		await super.setState(state, result);
 		this.renderPanel();
+	}
+
+	getConversationId(): string | null {
+		return this.conversationId;
+	}
+
+	/** Move the mounted root within the same window; the origin owns ACP. */
+	async showInEditorTab(): Promise<void> {
+		const workspace = this.app.workspace;
+		if (this.projection) {
+			await workspace.revealLeaf(this.projection.leaf);
+			return;
+		}
+		const leaf = workspace.getLeaf("tab");
+		await leaf.setViewState({
+			type: VIEW_TYPE_CHAT,
+			active: true,
+			state: { forwardFrom: this.viewId },
+		});
+		await workspace.revealLeaf(leaf);
 	}
 
 	/**
@@ -308,13 +346,6 @@ export class ChatView extends ItemView implements IChatViewContainer {
 	}
 
 	onOpen() {
-		// Create services owned by this class
-		this.acpClient = this.plugin.getOrCreateAcpClient(this.viewId);
-		this.vaultService = new VaultService(this.plugin);
-
-		// Register with plugin's view registry
-		this.plugin.viewRegistry.register(this);
-
 		// Do NOT mount yet: Obsidian delivers the view state via setState()
 		// during setViewState, and the panel must know which agent to launch
 		// before it renders (mounting early spawns the default agent and
@@ -343,10 +374,37 @@ export class ChatView extends ItemView implements IChatViewContainer {
 			window.clearTimeout(this.mountFallbackTimer);
 			this.mountFallbackTimer = null;
 		}
+		if (this.forwardFrom && !this.root) {
+			const owner = this.plugin.viewRegistry.get(this.forwardFrom);
+			this.contentEl.empty();
+			if (
+				!(owner instanceof ChatView) ||
+				!owner.mountEl ||
+				(owner.projection && owner.projection !== this) ||
+				owner.mountEl.ownerDocument !== this.contentEl.ownerDocument
+			) {
+				this.contentEl.createEl("p", {
+					text: "The source conversation is not open in this window.",
+				});
+				return;
+			}
+			this.origin = owner;
+			owner.projection = this;
+			this.contentEl.appendChild(owner.mountEl);
+			owner.contentEl.createEl("p", {
+				cls: "xo-note-move-placeholder",
+				text: "This conversation is in an editor tab. Close that tab to return it here.",
+			});
+			return;
+		}
 		if (!this.root) {
-			const container = this.containerEl.children[1];
+			this.acpClient = this.plugin.getOrCreateAcpClient(this.viewId);
+			this.vaultService = new VaultService(this.plugin);
+			this.plugin.viewRegistry.register(this);
+			const container = this.contentEl;
 			container.empty();
-			this.root = createRoot(container);
+			this.mountEl = container.createDiv("xo-note-mount");
+			this.root = createRoot(this.mountEl);
 		}
 		this.root.render(
 			<ChatComponent
@@ -366,6 +424,19 @@ export class ChatView extends ItemView implements IChatViewContainer {
 			this.mountFallbackTimer = null;
 		}
 
+		if (this.forwardFrom) {
+			const owner = this.origin;
+			if (owner?.projection === this && owner.mountEl) {
+				owner.contentEl.empty();
+				owner.contentEl.appendChild(owner.mountEl);
+				owner.projection = null;
+			}
+			this.origin = null;
+			return;
+		}
+		if (this.projection) {
+			this.projection.origin = null;
+		}
 		// Unregister from plugin's view registry
 		this.plugin.viewRegistry.unregister(this.viewId);
 
@@ -374,6 +445,13 @@ export class ChatView extends ItemView implements IChatViewContainer {
 		if (this.root) {
 			this.root.unmount();
 			this.root = null;
+		}
+		if (this.projection) {
+			this.projection.contentEl.empty();
+			this.projection.contentEl.createEl("p", {
+				text: "The source conversation was closed. Open it from history to continue.",
+			});
+			this.projection = null;
 		}
 
 		// Cleanup services owned by this class

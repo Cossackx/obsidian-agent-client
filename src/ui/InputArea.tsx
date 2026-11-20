@@ -224,7 +224,7 @@ export interface InputAreaProps {
 	onSendMessage: (
 		content: string,
 		attachments?: AttachedFile[],
-	) => Promise<void>;
+	) => Promise<boolean | void>;
 	/** Callback to stop the current generation */
 	onStopGeneration: () => Promise<void>;
 	/** Callback when restored message has been consumed */
@@ -628,7 +628,7 @@ export function InputArea({
 			const { newText, newCursorPos } = insertMentions(
 				inputValue,
 				position,
-				notes.map((note) => note.basename),
+				notes.map((note) => note.path),
 			);
 			setTextAndFocus(newText, newCursorPos);
 		},
@@ -881,14 +881,13 @@ export function InputArea({
 		const filesToSend =
 			attachedFiles.length > 0 ? [...attachedFiles] : undefined;
 
-		// Clear input, files, and hint state immediately
+		// Cancellation or uncertain completion leaves the draft available.
+		if ((await onSendMessage(messageToSend, filesToSend)) === false) return;
 		onInputChange("");
 		onAttachedFilesChange([]);
 		setHintText(null);
 		setCommandText("");
 		resetHistory();
-
-		await onSendMessage(messageToSend, filesToSend);
 	}, [
 		isSending,
 		inputValue,

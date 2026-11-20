@@ -39,6 +39,7 @@ import {
 } from "../utils/wikilink-resolver";
 import { formatLinkedNotesBlock } from "../utils/wikilink-formatter";
 import { extractSelection, truncateText } from "../utils/selection";
+import type { PreparedContext } from "./context-builder";
 
 // ============================================================================
 // Types
@@ -48,6 +49,7 @@ import { extractSelection, truncateText } from "../utils/selection";
  * Input for preparing a prompt
  */
 export interface PreparePromptInput {
+	preparedContext?: PreparedContext;
 	/** User's message text (may contain @mentions) */
 	message: string;
 
@@ -120,6 +122,7 @@ export interface PreparePromptResult {
  * Input for sending a prepared prompt
  */
 export interface SendPreparedPromptInput {
+	strictCompletion?: boolean;
 	/** Current session ID */
 	sessionId: string;
 
@@ -446,11 +449,22 @@ export async function preparePrompt(
 	vaultAccess: IVaultAccess,
 	mentionService: IMentionService,
 ): Promise<PreparePromptResult> {
-	const mentionedNotes = extractMentionedNotes(input.message, mentionService);
-
-	return input.supportsEmbeddedContext
-		? preparePromptWithEmbeddedContext(input, vaultAccess, mentionedNotes)
-		: preparePromptWithTextContext(input, vaultAccess, mentionedNotes);
+	const excluded = new Set(input.preparedContext?.excludedPaths);
+	const mentionedNotes = extractMentionedNotes(
+		input.message,
+		mentionService,
+	).filter(({ file }) => !file || !excluded.has(file.path));
+	// Keep the user's words, but do not implicitly re-attach a captured or destination-only note.
+	const base =
+		input.activeNote && excluded.has(input.activeNote.path)
+			? { ...input, activeNote: null }
+			: input;
+	const prepared = await (base.supportsEmbeddedContext
+		? preparePromptWithEmbeddedContext(base, vaultAccess, mentionedNotes)
+		: preparePromptWithTextContext(base, vaultAccess, mentionedNotes));
+	if (input.preparedContext)
+		prepared.agentContent.push(...input.preparedContext.blocks);
+	return prepared;
 }
 
 /**
@@ -827,7 +841,11 @@ export async function sendPreparedPrompt(
 	agentClient: AcpClient,
 ): Promise<SendPromptResult> {
 	try {
-		await agentClient.sendPrompt(input.sessionId, input.agentContent);
+		await agentClient.sendPrompt(
+			input.sessionId,
+			input.agentContent,
+			input.strictCompletion,
+		);
 
 		return {
 			success: true,
@@ -835,6 +853,14 @@ export async function sendPreparedPrompt(
 			agentContent: input.agentContent,
 		};
 	} catch (error) {
+		if (input.strictCompletion) {
+			return {
+				success: false,
+				displayContent: input.displayContent,
+				agentContent: input.agentContent,
+				error: toAcpError(error, input.sessionId),
+			};
+		}
 		return await handleSendError(
 			error,
 			input.sessionId,

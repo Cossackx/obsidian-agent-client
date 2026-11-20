@@ -35,7 +35,11 @@ export interface UseChatActionsReturn {
 	handleSendMessage: (
 		content: string,
 		attachments?: AttachedFile[],
-	) => Promise<void>;
+		companion?: Pick<
+			import("./useAgentMessages").SendMessageOptions,
+			"preparedContext" | "approvePayload" | "onConfirmed"
+		>,
+	) => Promise<boolean>;
 	handleStopGeneration: () => Promise<void>;
 	handleNewChat: (requestedAgentId?: string) => Promise<void>;
 	handleExportChat: () => Promise<void>;
@@ -141,7 +145,14 @@ export function useChatActions(
 	const shouldConvertToWsl = Platform.isWin && settings.windowsWslMode;
 
 	const handleSendMessage = useCallback(
-		async (content: string, attachments?: AttachedFile[]) => {
+		async (
+			content: string,
+			attachments?: AttachedFile[],
+			companion?: Pick<
+				import("./useAgentMessages").SendMessageOptions,
+				"preparedContext" | "approvePayload" | "onConfirmed"
+			>,
+		) => {
 			// Dismiss overlays on send
 			agent.clearError();
 			setAgentUpdateNotification(null);
@@ -179,7 +190,13 @@ export function useChatActions(
 				}
 			}
 
+			let confirmed = false;
 			await agent.sendMessage(content, {
+				...companion,
+				onConfirmed: (reply, id) => {
+					confirmed = true;
+					companion?.onConfirmed?.(reply, id);
+				},
 				activeNote: suggestions.mentions.activeNote,
 				vaultBasePath: vaultPath,
 				isAutoMentionDisabled:
@@ -191,7 +208,11 @@ export function useChatActions(
 			});
 
 			// Save session metadata locally on first message
-			if (isFirstMessage && session.sessionId) {
+			if (
+				isFirstMessage &&
+				session.sessionId &&
+				(!companion || confirmed)
+			) {
 				await sessionHistory.saveSessionLocally(
 					session.sessionId,
 					content,
@@ -201,6 +222,7 @@ export function useChatActions(
 					`[ChatPanel] Session saved locally: ${session.sessionId}`,
 				);
 			}
+			return confirmed;
 		},
 		[
 			agent.clearError,

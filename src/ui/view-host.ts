@@ -24,6 +24,7 @@ import type { App } from "obsidian";
 export interface IChatViewHost {
 	/** Obsidian App instance for API access */
 	app: App;
+	showInEditorTab?(): Promise<void>;
 
 	/**
 	 * Register a DOM event listener that will be cleaned up when the view closes.

@@ -7,6 +7,105 @@ If your plugin does not need CSS, delete this file.
 
 */
 
+/* ===== Note companion ===== */
+.xo-note-status,
+.xo-note-row {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: var(--size-4-1);
+	min-width: 0;
+}
+
+.xo-note-status {
+	justify-content: space-between;
+	padding: var(--size-2-2) var(--size-4-3);
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	border-top: 1px solid var(--background-modifier-border);
+	overflow-wrap: anywhere;
+}
+
+.xo-note-tray {
+	flex: 0 1 auto;
+	min-height: 0;
+	max-height: min(42vh, 22rem);
+	overflow: auto;
+	padding: var(--size-4-2) var(--size-4-3);
+	background: var(--background-secondary);
+	font-size: var(--font-ui-small);
+	color: var(--text-normal);
+	overflow-wrap: anywhere;
+}
+
+.xo-note-tray summary,
+.xo-note-modal summary {
+	cursor: pointer;
+	font-weight: var(--font-medium);
+}
+
+.xo-note-tray button,
+.xo-note-picker button,
+.xo-note-modal button {
+	height: auto;
+	min-height: var(--input-height);
+	max-width: 100%;
+	white-space: normal;
+	overflow-wrap: anywhere;
+}
+
+.xo-note-chip {
+	margin-block: var(--size-4-1);
+	padding: var(--size-4-1) var(--size-4-2);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+}
+
+.xo-note-tray textarea {
+	width: 100%;
+	resize: vertical;
+}
+
+.xo-note-tray pre,
+.xo-note-modal pre {
+	max-height: 28vh;
+	overflow: auto;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	font-family: var(--font-monospace);
+}
+
+.xo-note-muted {
+	color: var(--text-muted);
+}
+
+.xo-note-warning {
+	color: var(--text-error);
+}
+
+.xo-note-picker {
+	display: grid;
+	gap: var(--size-4-1);
+	max-height: 55vh;
+	overflow: auto;
+	padding: var(--size-4-1);
+}
+
+.xo-note-tray :focus-visible,
+.xo-note-modal :focus-visible,
+.xo-note-picker :focus-visible {
+	outline: 2px solid var(--interactive-accent);
+	outline-offset: 2px;
+}
+
+.xo-note-diff-added {
+	color: var(--text-success);
+}
+
+.xo-note-diff-removed {
+	color: var(--text-error);
+}
+
 /* ===== Session Manager ===== */
 
 .agent-client-session-manager {

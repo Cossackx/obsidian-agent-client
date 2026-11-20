@@ -1,0 +1,109 @@
+import { Modal, Notice } from "obsidian";
+import { findNoteSessions } from "../services/note-session-index";
+import { compareSource } from "../services/source-comparison";
+import type AgentClientPlugin from "../plugin";
+import type { SavedSessionInfo } from "../types/session";
+import { computeDiffLines } from "../utils/diff-lines";
+
+export async function openNoteSessionPicker(
+	plugin: AgentClientPlugin,
+	path: string,
+	options: {
+		open: (session: SavedSessionInfo, resume: boolean) => Promise<void>;
+		canResume: (session: SavedSessionInfo) => boolean;
+		newChat: () => Promise<void>;
+	},
+) {
+	const matches = await findNoteSessions(
+		path,
+		plugin.settingsService.getSavedSessions(),
+		plugin.companionStorage,
+	);
+	new (class extends Modal {
+		onOpen() {
+			this.setTitle(`Note conversations · ${path}`);
+			this.contentEl.addClass("xo-note-modal");
+			const run = (work: () => Promise<void>) => {
+				void work().catch((error: unknown) => {
+					new Notice(
+						error instanceof Error
+							? error.message
+							: "Conversation action failed",
+					);
+				});
+			};
+			this.contentEl.createEl("button", {
+				text: "New conversation",
+			}).onclick = () => {
+				this.close();
+				run(options.newChat);
+			};
+			if (!matches.length)
+				this.contentEl.createEl("p", {
+					text: "No local companion sessions are associated with this exact path.",
+				});
+			for (const { session, companion } of matches) {
+				const card = this.contentEl.createDiv("xo-note-chip");
+				card.createEl("h4", {
+					text: session.title || session.sessionId,
+				});
+				const tools = card.createDiv("xo-note-row");
+				tools.createEl("button", {
+					text: "Open history only",
+				}).onclick = () => {
+					this.close();
+					run(() => options.open(session, false));
+				};
+				if (options.canResume(session))
+					tools.createEl("button", {
+						text: "Resume with agent",
+					}).onclick = () => {
+						this.close();
+						run(() => options.open(session, true));
+					};
+				const prior = [...companion.sent]
+					.reverse()
+					.flatMap((turn) => turn.sources)
+					.find((item) => item.path === path);
+				if (!prior) {
+					card.createEl("p", {
+						text: "No confirmed sent snapshot is available.",
+					});
+					continue;
+				}
+				tools.createEl("button", { text: "What changed?" }).onclick =
+					() =>
+						run(async () => {
+							const file = plugin.app.vault.getFileByPath(path);
+							if (!file) {
+								card.createEl("p", {
+									text: "The source is no longer present; the original sent excerpt remains local.",
+								});
+								card.createEl("pre", { text: prior.text });
+								return;
+							}
+							const snapshot = {
+								path,
+								text: await plugin.app.vault.read(file),
+								capturedAt: Date.now(),
+							};
+							const comparison = compareSource(prior, snapshot);
+							const output = card.createEl("pre");
+							output.setText(
+								comparison.changed
+									? computeDiffLines(
+											comparison.before,
+											comparison.after,
+										)
+											.map(
+												(line) =>
+													`${line.type === "added" ? "+" : line.type === "removed" ? "-" : " "} ${line.content}`,
+											)
+											.join("\n")
+									: "No textual change in this scope.",
+							);
+						});
+			}
+		}
+	})(plugin.app).open();
+}
