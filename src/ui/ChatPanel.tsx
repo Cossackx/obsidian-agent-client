@@ -14,6 +14,7 @@ import {
 } from "obsidian";
 
 import type { AttachedFile, ChatInputState, ChatMessage } from "../types/chat";
+import type { TranscriptSnapshot } from "../hooks/useAgentMessages";
 import type { NoteMetadata } from "../services/vault-service";
 import { isSameDirectory } from "../utils/platform";
 import {
@@ -392,7 +393,6 @@ export const ChatPanel = React.memo(function ChatPanel({
 	busySending.current = isSending;
 	const flushDraft = companion.flush;
 	const invalidateComposer = composer.invalidate;
-	const flushTranscript = useRef<() => void>(() => {});
 	const prepareRestore = useCallback(async () => {
 		if (
 			changingOwner.current ||
@@ -408,7 +408,6 @@ export const ChatPanel = React.memo(function ChatPanel({
 			changingOwner.current = false;
 		};
 		try {
-			flushTranscript.current();
 			await flushDraft();
 		} catch (error) {
 			finish();
@@ -1218,43 +1217,53 @@ export const ChatPanel = React.memo(function ChatPanel({
 	autoExportRef.current = autoExportIfEnabled;
 	closeSessionRef.current = agent.closeSession;
 	saveSessionMessagesRef.current = sessionHistory.saveSessionMessages;
-	flushTranscript.current = () => {
-		const latest = messagesRef.current;
-		const sid = sessionRef.current.sessionId;
-		if (
-			sid &&
-			sentThisSessionRef.current?.id === sid &&
-			sentThisSessionRef.current.version ===
-				transcriptVersionRef.current &&
-			latest.length > 0 &&
-			lastSavedMessagesRef.current !== latest
-		) {
-			lastSavedMessagesRef.current = latest;
-			saveSessionMessagesRef.current(sid, latest);
-		}
-	};
+	const saveOutgoingTranscript = useCallback(
+		({ version, messages: latest }: TranscriptSnapshot) => {
+			const sid = sessionRef.current.sessionId;
+			if (
+				sid &&
+				sentThisSessionRef.current?.id === sid &&
+				sentThisSessionRef.current.version === version &&
+				version === transcriptVersionRef.current &&
+				latest.length > 0 &&
+				lastSavedMessagesRef.current !== latest
+			) {
+				lastSavedMessagesRef.current = latest;
+				saveSessionMessagesRef.current(sid, latest);
+			}
+		},
+		[],
+	);
+	const { beforeTranscriptReplacement, takeTranscriptSnapshot } = agent;
+	useLayoutEffect(
+		() => beforeTranscriptReplacement(saveOutgoingTranscript),
+		[beforeTranscriptReplacement, saveOutgoingTranscript],
+	);
 
-	// Cleanup on unmount only - auto-export and close session
-	useEffect(() => {
+	// Capture before the message hook's passive cleanup discards its RAF queue.
+	useLayoutEffect(() => {
 		return () => {
 			logger.log("[ChatPanel] Cleanup: auto-export and close session");
 			// Flush trailing-chunk content the debounced save may not have
 			// persisted yet (view closed within the debounce window). Only when a
 			// real turn ran this session and there is unsaved content. (#320 review)
-			const latest = messagesRef.current;
-			flushTranscript.current();
+			const outgoing = takeTranscriptSnapshot();
+			const closing = sessionRef.current;
+			saveOutgoingTranscript(outgoing);
 			void (async () => {
-				await autoExportRef.current(
-					"closeChat",
-					latest,
-					sessionRef.current,
-				);
+				if (outgoing.version === transcriptVersionRef.current) {
+					await autoExportRef.current(
+						"closeChat",
+						outgoing.messages,
+						closing,
+					);
+				}
 				// Embedded clients belong to the container's grace-period lease,
 				// not to the panel whose export may outlive that lease.
 				if (variant !== "embedded") await closeSessionRef.current();
 			})();
 		};
-	}, [logger, variant]);
+	}, [logger, variant, saveOutgoingTranscript, takeTranscriptSnapshot]);
 
 	// ============================================================
 	// Effects - Update Check

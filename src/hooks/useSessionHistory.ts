@@ -567,14 +567,14 @@ export function useSessionHistory(
 						throw new Error(
 							"The agent could not restore the exact conversation",
 						);
-					// Publish identity and replace the transcript in one synchronous
-					// React batch. Only preference restoration may continue asynchronously.
+					// Retire the outgoing transcript before publishing the new identity,
+					// in the same synchronous batch. Preferences alone may settle later.
+					onClearMessages?.();
 					const preferences = onSessionLoad(
 						result.sessionId,
 						result.modes,
 						result.configOptions,
 					);
-					onClearMessages?.();
 					const useLocal =
 						localMessages !== null && onMessagesRestore;
 					if (useLocal) onIgnoreUpdates?.(true);
@@ -622,13 +622,13 @@ export function useSessionHistory(
 
 				// Update with new session ID and modes/models from result
 				// For fork, the new session ID is returned in result
+				onClearMessages?.();
 				const preferences = onSessionLoad(
 					result.sessionId,
 					result.modes,
 					result.configOptions,
 				);
 
-				onClearMessages?.();
 				if (localMessages && onMessagesRestore) {
 					onMessagesRestore(localMessages);
 				}

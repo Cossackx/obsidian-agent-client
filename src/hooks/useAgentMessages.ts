@@ -67,11 +67,20 @@ export interface SendMessageOptions {
 	isFirstMessage?: boolean;
 }
 
+export interface TranscriptSnapshot {
+	version: number;
+	messages: ChatMessage[];
+}
+
 export interface UseAgentMessagesReturn {
 	// Message state
 	messages: ChatMessage[];
 	isSending: boolean;
 	transcriptVersion: number;
+	takeTranscriptSnapshot: () => TranscriptSnapshot;
+	beforeTranscriptReplacement: (
+		save: (snapshot: TranscriptSnapshot) => void,
+	) => () => void;
 
 	// Message operations
 	sendMessage: (
@@ -121,6 +130,11 @@ export function useAgentMessages(
 	const [messages, setMessages] = useState<ChatMessage[]>([]);
 	const [isSending, setIsSending] = useState(false);
 	const [transcriptVersion, replaceTranscript] = useState(0);
+	// React renders are a projection of this transcript, not its source of truth.
+	const transcript = useRef<TranscriptSnapshot>({ version: 0, messages });
+	const onReplace = useRef<((snapshot: TranscriptSnapshot) => void) | null>(
+		null,
+	);
 
 	// Tool call index: toolCallId → message index for O(1) lookup
 	const toolCallIndexRef = useRef<Map<string, number>>(new Map());
@@ -147,24 +161,34 @@ export function useAgentMessages(
 	const pendingUpdatesRef = useRef<SessionUpdate[]>([]);
 	const flushScheduledRef = useRef(false);
 
+	const applyUpdates = useCallback((updates: SessionUpdate[]) => {
+		for (const update of updates) {
+			transcript.current.messages = applySingleUpdate(
+				transcript.current.messages,
+				update,
+				toolCallIndexRef.current,
+			);
+		}
+	}, []);
+	const takeTranscriptSnapshot = useCallback((): TranscriptSnapshot => {
+		const updates = pendingUpdatesRef.current;
+		pendingUpdatesRef.current = [];
+		applyUpdates(updates);
+		return { ...transcript.current };
+	}, [applyUpdates]);
 	const flushPendingUpdates = useCallback(() => {
 		flushScheduledRef.current = false;
-		const updates = pendingUpdatesRef.current;
-		if (updates.length === 0) return;
-		pendingUpdatesRef.current = [];
-
-		setMessages((prev) => {
-			let result = prev;
-			for (const update of updates) {
-				result = applySingleUpdate(
-					result,
-					update,
-					toolCallIndexRef.current,
-				);
-			}
-			return result;
-		});
-	}, []);
+		setMessages(takeTranscriptSnapshot().messages);
+	}, [takeTranscriptSnapshot]);
+	const beforeTranscriptReplacement = useCallback(
+		(save: (snapshot: TranscriptSnapshot) => void) => {
+			onReplace.current = save;
+			return () => {
+				if (onReplace.current === save) onReplace.current = null;
+			};
+		},
+		[],
+	);
 
 	const enqueueUpdate = useCallback(
 		(update: SessionUpdate) => {
@@ -207,9 +231,15 @@ export function useAgentMessages(
 	// Message Operations
 	// ============================================================
 
-	const addMessage = useCallback((message: ChatMessage): void => {
-		setMessages((prev) => [...prev, message]);
-	}, []);
+	const addMessage = useCallback(
+		(message: ChatMessage): void => {
+			const before = takeTranscriptSnapshot();
+			const next = [...before.messages, message];
+			transcript.current.messages = next;
+			setMessages(next);
+		},
+		[takeTranscriptSnapshot],
+	);
 
 	const setIgnoreUpdates = useCallback((ignore: boolean): void => {
 		ignoreUpdatesRef.current = ignore;
@@ -237,30 +267,32 @@ export function useAgentMessages(
 					u.permissionRequest?.selectedOptionId !== undefined),
 		);
 		if (permissionUpdates.length > 0) {
-			setMessages((prev) => {
-				let result = prev;
-				for (const update of permissionUpdates) {
-					result = applySingleUpdate(
-						result,
-						update,
-						toolCallIndexRef.current,
-					);
-				}
-				return result;
-			});
+			applyUpdates(permissionUpdates);
+			setMessages(transcript.current.messages);
 		}
 
 		setIsSending(false);
-	}, []);
+	}, [applyUpdates]);
 
-	const clearMessages = useCallback((): void => {
-		pendingUpdatesRef.current = [];
-		replaceTranscript((version) => version + 1);
-		setMessages([]);
-		toolCallIndexRef.current.clear();
-		setIsSending(false);
-		setErrorInfo(null);
-	}, [setErrorInfo]);
+	const setMessagesFromLocal = useCallback(
+		(localMessages: ChatMessage[]): void => {
+			// Last synchronous boundary before the outgoing queue and index are replaced.
+			const outgoing = takeTranscriptSnapshot();
+			onReplace.current?.(outgoing);
+			const version = outgoing.version + 1;
+			transcript.current = { version, messages: localMessages };
+			replaceTranscript(version);
+			setMessages(localMessages);
+			rebuildToolCallIndex(localMessages, toolCallIndexRef.current);
+			setIsSending(false);
+			setErrorInfo(null);
+		},
+		[setErrorInfo, takeTranscriptSnapshot],
+	);
+	const clearMessages = useCallback(
+		() => setMessagesFromLocal([]),
+		[setMessagesFromLocal],
+	);
 
 	const setInitialMessages = useCallback(
 		(
@@ -280,24 +312,9 @@ export function useAgentMessages(
 				timestamp: msg.timestamp ? new Date(msg.timestamp) : new Date(),
 			}));
 
-			setMessages(chatMessages);
-			rebuildToolCallIndex(chatMessages, toolCallIndexRef.current);
-			setIsSending(false);
-			setErrorInfo(null);
+			setMessagesFromLocal(chatMessages);
 		},
-		[setErrorInfo],
-	);
-
-	const setMessagesFromLocal = useCallback(
-		(localMessages: ChatMessage[]): void => {
-			pendingUpdatesRef.current = [];
-			replaceTranscript((version) => version + 1);
-			setMessages(localMessages);
-			rebuildToolCallIndex(localMessages, toolCallIndexRef.current);
-			setIsSending(false);
-			setErrorInfo(null);
-		},
-		[setErrorInfo],
+		[setMessagesFromLocal],
 	);
 
 	const clearError = useCallback((): void => {
@@ -603,6 +620,8 @@ export function useAgentMessages(
 		messages,
 		isSending,
 		transcriptVersion,
+		takeTranscriptSnapshot,
+		beforeTranscriptReplacement,
 		sendMessage,
 		clearMessages,
 		setInitialMessages,

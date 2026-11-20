@@ -16,7 +16,11 @@ import type { ErrorInfo } from "../types/errors";
 import type { IMentionService } from "../utils/mention-parser";
 import type { IWikilinkResolver } from "../utils/wikilink-resolver";
 import { useAgentSession } from "./useAgentSession";
-import { useAgentMessages, type SendMessageOptions } from "./useAgentMessages";
+import {
+	useAgentMessages,
+	type SendMessageOptions,
+	type TranscriptSnapshot,
+} from "./useAgentMessages";
 
 // Re-export types that ChatPanel uses
 export type { SendMessageOptions } from "./useAgentMessages";
@@ -46,6 +50,10 @@ export interface UseAgentReturn {
 	messages: ChatMessage[];
 	isSending: boolean;
 	transcriptVersion: number;
+	takeTranscriptSnapshot: () => TranscriptSnapshot;
+	beforeTranscriptReplacement: (
+		save: (snapshot: TranscriptSnapshot) => void,
+	) => () => void;
 
 	// Combined error
 	errorInfo: ErrorInfo | null;
@@ -193,6 +201,9 @@ export function useAgent(
 			messages: agentMessages.messages,
 			isSending: agentMessages.isSending,
 			transcriptVersion: agentMessages.transcriptVersion,
+			takeTranscriptSnapshot: agentMessages.takeTranscriptSnapshot,
+			beforeTranscriptReplacement:
+				agentMessages.beforeTranscriptReplacement,
 
 			// Combined error
 			errorInfo,
@@ -231,6 +242,8 @@ export function useAgent(
 			agentMessages.messages,
 			agentMessages.isSending,
 			agentMessages.transcriptVersion,
+			agentMessages.takeTranscriptSnapshot,
+			agentMessages.beforeTranscriptReplacement,
 			errorInfo,
 			agentSession.createSession,
 			agentSession.restartSession,

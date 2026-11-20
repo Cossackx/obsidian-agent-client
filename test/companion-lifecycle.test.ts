@@ -654,6 +654,57 @@ function button(
 	return visit(node);
 }
 
+it("transcript replacement captures the rendered and RAF-pending parts once", async () => {
+	const frames: FrameRequestCallback[] = [];
+	window.requestAnimationFrame = (callback) => frames.push(callback);
+	const saved = vi.fn();
+	const view = await mount(() =>
+		useAgentMessages(
+			{} as never,
+			settingsAccess as never,
+			{} as never,
+			{ sessionId: "A" } as never,
+			noop,
+		),
+	);
+	const chunk = (sessionId: string, text: string) =>
+		view.current.enqueueUpdate({
+			type: "agent_message_chunk",
+			sessionId,
+			text,
+		});
+	await act(async () => {
+		view.current.beforeTranscriptReplacement(saved);
+		chunk("A", "A rendered");
+		frames.shift()?.(0);
+	});
+	const version = view.current.transcriptVersion;
+	const painted = view.current.messages;
+	await act(async () => {
+		chunk("A", " A pending");
+		view.current.clearMessages();
+		chunk("B", "B pending");
+		const pending = view.current.takeTranscriptSnapshot();
+		expect(pending.version).toBe(version + 1);
+		expect(pending.messages[0].content).toEqual([
+			{ type: "text", text: "B pending" },
+		]);
+		frames.shift()?.(0);
+	});
+	expect(saved).toHaveBeenCalledExactlyOnceWith({
+		version,
+		messages: [
+			expect.objectContaining({
+				content: [{ type: "text", text: "A rendered A pending" }],
+			}),
+		],
+	});
+	expect(view.current.messages[0].content).toEqual([
+		{ type: "text", text: "B pending" },
+	]);
+	expect(painted[0].content).toEqual([{ type: "text", text: "A rendered" }]);
+});
+
 it("real synthesis callback requires a correlated reply, not a session-local old chunk", async () => {
 	const disk = fixture();
 	await disk.store.update("A", (old) => ({ ...old, items: [item] }));

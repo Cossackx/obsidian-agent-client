@@ -97,7 +97,10 @@ export function applyUpdateLastMessage(
 	}
 
 	const lastMessage = prev[prev.length - 1];
-	const updatedMessage = { ...lastMessage };
+	const updatedMessage = {
+		...lastMessage,
+		content: [...lastMessage.content],
+	};
 
 	if (content.type === "text" || content.type === "agent_thought") {
 		const existingContentIndex = updatedMessage.content.findIndex(
@@ -151,7 +154,10 @@ export function applyUpdateUserMessage(
 	}
 
 	const lastMessage = prev[prev.length - 1];
-	const updatedMessage = { ...lastMessage };
+	const updatedMessage = {
+		...lastMessage,
+		content: [...lastMessage.content],
+	};
 
 	if (content.type === "text") {
 		const existingContentIndex = updatedMessage.content.findIndex(
