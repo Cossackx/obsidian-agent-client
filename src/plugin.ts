@@ -663,6 +663,9 @@ export default class AgentClientPlugin extends Plugin {
 	async removeAcpClient(viewId: string): Promise<void> {
 		const client = this._acpClients.get(viewId);
 		if (client) {
+			// Retire the captured client before awaiting teardown. A remount
+			// outside the grace window gets a new client, never this one.
+			this._acpClients.delete(viewId);
 			try {
 				await client.disconnect();
 			} catch (error) {
@@ -671,7 +674,6 @@ export default class AgentClientPlugin extends Plugin {
 					error,
 				);
 			}
-			this._acpClients.delete(viewId);
 		}
 		// Note: lastActiveChatViewId is now managed by viewRegistry
 		// Clearing happens automatically when view is unregistered

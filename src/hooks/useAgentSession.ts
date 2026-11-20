@@ -6,7 +6,7 @@
  */
 
 import * as React from "react";
-const { useState, useCallback, useRef } = React;
+const { useState, useCallback, useRef, useLayoutEffect } = React;
 
 import type {
 	ChatSession,
@@ -68,6 +68,7 @@ export interface UseAgentSessionReturn {
 
 	/** Handle session-level updates (commands, mode, config, usage, error) */
 	handleSessionUpdate: (update: SessionUpdate) => void;
+	getUpdateOwner: () => string | null;
 }
 
 // ============================================================================
@@ -106,6 +107,8 @@ export function useAgentSession(
 	// Ref for accessing latest session in callbacks without deps
 	const sessionRef = useRef(session);
 	sessionRef.current = session;
+	const updateOwner = useRef<string | null>(null);
+	const getUpdateOwner = useCallback(() => updateOwner.current, []);
 
 	// Generation counter for createSession: a run superseded by a newer call
 	// must not paint its late result — success or failure — over the newer
@@ -114,6 +117,12 @@ export function useAgentSession(
 	// process is killed by the newer initialize) lands AFTER the newer run
 	// cleared errorInfo, leaving a stale error banner over a working session.
 	const createGenerationRef = useRef(0);
+	useLayoutEffect(
+		() => () => {
+			createGenerationRef.current++;
+		},
+		[],
+	);
 
 	// ============================================================
 	// Session Update Handler (session-level only)
@@ -180,6 +189,7 @@ export function useAgentSession(
 			restoreId?: string,
 		) => {
 			const generation = ++createGenerationRef.current;
+			updateOwner.current = null;
 			const effectiveCwd = overrideCwd || workingDirectory;
 			const settings = settingsAccess.getSnapshot();
 			const agentId = overrideAgentId || getDefaultAgentId(settings);
@@ -299,6 +309,7 @@ export function useAgentSession(
 				if (generation !== createGenerationRef.current) {
 					return;
 				}
+				updateOwner.current = sessionResult.sessionId;
 				setSession((prev) => ({
 					...prev,
 					sessionId: sessionResult.sessionId,
@@ -342,6 +353,7 @@ export function useAgentSession(
 	);
 
 	const closeSession = useCallback(async () => {
+		const generation = ++createGenerationRef.current;
 		const s = sessionRef.current;
 		if (s.sessionId) {
 			try {
@@ -350,11 +362,14 @@ export function useAgentSession(
 				getLogger().warn("Failed to cancel session:", error);
 			}
 		}
+		if (generation !== createGenerationRef.current) return;
+		updateOwner.current = null;
 		try {
 			await agentClient.disconnect();
 		} catch (error) {
 			getLogger().warn("Failed to disconnect:", error);
 		}
+		if (generation !== createGenerationRef.current) return;
 		setSession((prev) => ({
 			...prev,
 			sessionId: null,
@@ -394,10 +409,23 @@ export function useAgentSession(
 			modes?: SessionModeState,
 			configOptions?: SessionConfigOption[],
 		) => {
-			// Pre-compute restored config BEFORE marking ready to avoid a UI
-			// race where the dropdowns briefly show the agent's current values
-			// before the user's saved selection is re-applied. See the matching
-			// refactor in createSession for the rationale.
+			// The caller replaces the transcript in this same synchronous turn.
+			// Preferences may settle later but never publish a conversation ID.
+			const generation = ++createGenerationRef.current;
+			const restoringConfig = !!(configOptions || modes);
+			updateOwner.current = sessionId;
+			setSession((prev) => ({
+				...prev,
+				sessionId,
+				state: restoringConfig ? "initializing" : "ready",
+				modes,
+				configOptions,
+				lastActivityAt: new Date(),
+			}));
+			if (!restoringConfig) return;
+			const current = () =>
+				generation === createGenerationRef.current &&
+				agentClient.hasLiveSession(sessionId);
 			const s = sessionRef.current;
 			const settings = settingsAccess.getSnapshot();
 			const agentId = s.agentId;
@@ -413,6 +441,7 @@ export function useAgentSession(
 					restored,
 					settings.lastUsedConfigOptions[agentId],
 				);
+				if (!current()) return;
 				restored = await tryRestoreConfigOption(
 					agentClient,
 					sessionId,
@@ -420,6 +449,7 @@ export function useAgentSession(
 					"model",
 					settings.lastUsedModels[agentId],
 				);
+				if (!current()) return;
 				restored = await tryRestoreConfigOption(
 					agentClient,
 					sessionId,
@@ -437,14 +467,18 @@ export function useAgentSession(
 				finalModes = restored.modes;
 			}
 
-			setSession((prev) => ({
-				...prev,
-				sessionId,
-				state: "ready",
-				modes: finalModes ?? prev.modes,
-				configOptions: finalConfigOptions ?? prev.configOptions,
-				lastActivityAt: new Date(),
-			}));
+			if (!current()) return;
+			setSession((prev) =>
+				prev.sessionId === sessionId && prev.state === "initializing"
+					? {
+							...prev,
+							state: "ready",
+							modes: finalModes ?? prev.modes,
+							configOptions:
+								finalConfigOptions ?? prev.configOptions,
+						}
+					: prev,
+			);
 		},
 		[agentClient, settingsAccess],
 	);
@@ -594,5 +628,6 @@ export function useAgentSession(
 		setMode,
 		setConfigOption,
 		handleSessionUpdate,
+		getUpdateOwner,
 	};
 }

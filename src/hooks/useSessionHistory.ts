@@ -62,7 +62,7 @@ export interface SessionLoadCallback {
 		sessionId: string,
 		modes?: SessionModeState,
 		configOptions?: SessionConfigOption[],
-	): void;
+	): Promise<void> | void;
 }
 
 /**
@@ -567,12 +567,14 @@ export function useSessionHistory(
 						throw new Error(
 							"The agent could not restore the exact conversation",
 						);
-					onClearMessages?.();
-					onSessionLoad(
+					// Publish identity and replace the transcript in one synchronous
+					// React batch. Only preference restoration may continue asynchronously.
+					const preferences = onSessionLoad(
 						result.sessionId,
 						result.modes,
 						result.configOptions,
 					);
+					onClearMessages?.();
 					const useLocal =
 						localMessages !== null && onMessagesRestore;
 					if (useLocal) onIgnoreUpdates?.(true);
@@ -582,6 +584,7 @@ export function useSessionHistory(
 					} finally {
 						if (useLocal) onIgnoreUpdates?.(false);
 					}
+					await preferences;
 				} catch (err) {
 					const errorMessage = extractErrorMessage(err);
 					setError(`Failed to restore session: ${errorMessage}`);
@@ -612,22 +615,24 @@ export function useSessionHistory(
 			setError(null);
 
 			try {
+				// Fetch inherited history before changing the display owner.
+				const localMessages =
+					await settingsAccess.loadSessionMessages(sessionId);
 				const result = await agentClient.forkSession(sessionId, cwd);
 
 				// Update with new session ID and modes/models from result
 				// For fork, the new session ID is returned in result
-				onSessionLoad(
+				const preferences = onSessionLoad(
 					result.sessionId,
 					result.modes,
 					result.configOptions,
 				);
 
-				// Fork doesn't return history, so restore from original session's local storage
-				const localMessages =
-					await settingsAccess.loadSessionMessages(sessionId);
+				onClearMessages?.();
 				if (localMessages && onMessagesRestore) {
 					onMessagesRestore(localMessages);
 				}
+				await preferences;
 
 				// Save forked session to history
 				if (session.agentId) {

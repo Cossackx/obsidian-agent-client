@@ -362,7 +362,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 				},
 			);
 			publishedId.current = sessionId;
-			void agent.updateSessionFromLoad(sessionId, modes, configOptions);
+			return agent.updateSessionFromLoad(sessionId, modes, configOptions);
 		},
 		[logger, agent.updateSessionFromLoad],
 	);
@@ -392,6 +392,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 	busySending.current = isSending;
 	const flushDraft = companion.flush;
 	const invalidateComposer = composer.invalidate;
+	const flushTranscript = useRef<() => void>(() => {});
 	const prepareRestore = useCallback(async () => {
 		if (
 			changingOwner.current ||
@@ -407,6 +408,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 			changingOwner.current = false;
 		};
 		try {
+			flushTranscript.current();
 			await flushDraft();
 		} catch (error) {
 			finish();
@@ -1117,9 +1119,11 @@ export const ChatPanel = React.memo(function ChatPanel({
 						return;
 					}
 					publishedId.current = initialConversationId;
-					await agent.updateSessionFromLoad(initialConversationId);
-					if (stillMounted())
-						agent.setMessagesFromLocal(history ?? []);
+					const preferences = agent.updateSessionFromLoad(
+						initialConversationId,
+					);
+					agent.setMessagesFromLocal(history ?? []);
+					await preferences;
 				},
 			).catch(
 				() =>
@@ -1192,6 +1196,8 @@ export const ChatPanel = React.memo(function ChatPanel({
 	// Refs for cleanup (to access latest values in cleanup function)
 	const messagesRef = useRef(messages);
 	const sessionRef = useRef(session);
+	const transcriptVersion = agent.transcriptVersion;
+	const transcriptVersionRef = useRef(transcriptVersion);
 	const autoExportRef = useRef(autoExportIfEnabled);
 	const closeSessionRef = useRef(agent.closeSession);
 	const saveSessionMessagesRef = useRef(sessionHistory.saveSessionMessages);
@@ -1199,16 +1205,34 @@ export const ChatPanel = React.memo(function ChatPanel({
 	// trailing-chunk re-save and close-time flush are armed only after a real
 	// turn, so messages that were merely loaded/replayed are never re-saved
 	// (which would bump updatedAt and corrupt "last used" ordering). (#320 review)
-	const sentThisSessionRef = useRef(false);
+	const sentThisSessionRef = useRef<{ id: string; version: number } | null>(
+		null,
+	);
 	// Reference identity of the messages array last persisted to disk. Used to
 	// de-duplicate the turn-end save, the trailing-chunk re-save, and the
 	// close-time flush.
 	const lastSavedMessagesRef = useRef<ChatMessage[] | null>(null);
 	messagesRef.current = messages;
 	sessionRef.current = session;
+	transcriptVersionRef.current = transcriptVersion;
 	autoExportRef.current = autoExportIfEnabled;
 	closeSessionRef.current = agent.closeSession;
 	saveSessionMessagesRef.current = sessionHistory.saveSessionMessages;
+	flushTranscript.current = () => {
+		const latest = messagesRef.current;
+		const sid = sessionRef.current.sessionId;
+		if (
+			sid &&
+			sentThisSessionRef.current?.id === sid &&
+			sentThisSessionRef.current.version ===
+				transcriptVersionRef.current &&
+			latest.length > 0 &&
+			lastSavedMessagesRef.current !== latest
+		) {
+			lastSavedMessagesRef.current = latest;
+			saveSessionMessagesRef.current(sid, latest);
+		}
+	};
 
 	// Cleanup on unmount only - auto-export and close session
 	useEffect(() => {
@@ -1218,25 +1242,19 @@ export const ChatPanel = React.memo(function ChatPanel({
 			// persisted yet (view closed within the debounce window). Only when a
 			// real turn ran this session and there is unsaved content. (#320 review)
 			const latest = messagesRef.current;
-			const sid = sessionRef.current.sessionId;
-			if (
-				sentThisSessionRef.current &&
-				sid &&
-				latest.length > 0 &&
-				lastSavedMessagesRef.current !== latest
-			) {
-				saveSessionMessagesRef.current(sid, latest);
-			}
+			flushTranscript.current();
 			void (async () => {
 				await autoExportRef.current(
 					"closeChat",
 					latest,
 					sessionRef.current,
 				);
-				await closeSessionRef.current();
+				// Embedded clients belong to the container's grace-period lease,
+				// not to the panel whose export may outlive that lease.
+				if (variant !== "embedded") await closeSessionRef.current();
 			})();
 		};
-	}, [logger]);
+	}, [logger, variant]);
 
 	// ============================================================
 	// Effects - Update Check
@@ -1270,27 +1288,29 @@ export const ChatPanel = React.memo(function ChatPanel({
 	// ============================================================
 	// Effects - Save Session Messages on Turn End
 	// ============================================================
-	const prevIsSendingRef = useRef<boolean>(false);
-
-	// Re-loading/switching sessions disarms the trailing-chunk save & flush, so
-	// freshly loaded/replayed messages are never re-saved (which would bump
-	// updatedAt and corrupt "last used" ordering). (#320 review)
-	useEffect(() => {
-		sentThisSessionRef.current = false;
-	}, [session.sessionId]);
+	const prevIsSendingRef = useRef<{
+		id: string | null;
+		version: number;
+	} | null>(null);
 
 	useEffect(() => {
 		const wasSending = prevIsSendingRef.current;
-		prevIsSendingRef.current = isSending;
+		prevIsSendingRef.current = isSending
+			? { id: session.sessionId, version: transcriptVersion }
+			: null;
 
 		// Save when turn ends (isSending: true -> false) and has messages
 		if (
-			wasSending &&
 			!isSending &&
 			session.sessionId &&
+			wasSending?.id === session.sessionId &&
+			wasSending.version === transcriptVersion &&
 			messages.length > 0
 		) {
-			sentThisSessionRef.current = true;
+			sentThisSessionRef.current = {
+				id: session.sessionId,
+				version: transcriptVersion,
+			};
 			lastSavedMessagesRef.current = messages;
 			sessionHistory.saveSessionMessages(session.sessionId, messages);
 			logger.log(
@@ -1310,6 +1330,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 	}, [
 		isSending,
 		session.sessionId,
+		transcriptVersion,
 		messages,
 		sessionHistory.saveSessionMessages,
 		settings.enableSystemNotifications,
@@ -1324,9 +1345,18 @@ export const ChatPanel = React.memo(function ChatPanel({
 	useEffect(() => {
 		const sessionId = session.sessionId;
 		if (isSending || !sessionId || messages.length === 0) return;
-		if (!sentThisSessionRef.current) return;
+		if (
+			sentThisSessionRef.current?.id !== sessionId ||
+			sentThisSessionRef.current.version !== transcriptVersion
+		)
+			return;
 		if (lastSavedMessagesRef.current === messages) return;
 		const timer = window.setTimeout(() => {
+			if (
+				sessionRef.current.sessionId !== sessionId ||
+				transcriptVersionRef.current !== transcriptVersion
+			)
+				return;
 			lastSavedMessagesRef.current = messages;
 			sessionHistory.saveSessionMessages(sessionId, messages);
 		}, TRAILING_SAVE_DEBOUNCE_MS);
@@ -1334,6 +1364,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 	}, [
 		isSending,
 		session.sessionId,
+		transcriptVersion,
 		messages,
 		sessionHistory.saveSessionMessages,
 	]);
@@ -2054,13 +2085,14 @@ export const ChatPanel = React.memo(function ChatPanel({
 										if (!stillMounted()) return;
 										historyOwner.current = saved;
 										publishedId.current = saved.sessionId;
-										await agent.updateSessionFromLoad(
-											saved.sessionId,
-										);
-										if (stillMounted())
-											agent.setMessagesFromLocal(
-												history ?? [],
+										const preferences =
+											agent.updateSessionFromLoad(
+												saved.sessionId,
 											);
+										agent.setMessagesFromLocal(
+											history ?? [],
+										);
+										await preferences;
 									},
 								);
 							} finally {

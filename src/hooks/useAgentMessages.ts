@@ -71,6 +71,7 @@ export interface UseAgentMessagesReturn {
 	// Message state
 	messages: ChatMessage[];
 	isSending: boolean;
+	transcriptVersion: number;
 
 	// Message operations
 	sendMessage: (
@@ -119,6 +120,7 @@ export function useAgentMessages(
 
 	const [messages, setMessages] = useState<ChatMessage[]>([]);
 	const [isSending, setIsSending] = useState(false);
+	const [transcriptVersion, replaceTranscript] = useState(0);
 
 	// Tool call index: toolCallId → message index for O(1) lookup
 	const toolCallIndexRef = useRef<Map<string, number>>(new Map());
@@ -253,6 +255,7 @@ export function useAgentMessages(
 
 	const clearMessages = useCallback((): void => {
 		pendingUpdatesRef.current = [];
+		replaceTranscript((version) => version + 1);
 		setMessages([]);
 		toolCallIndexRef.current.clear();
 		setIsSending(false);
@@ -287,6 +290,8 @@ export function useAgentMessages(
 
 	const setMessagesFromLocal = useCallback(
 		(localMessages: ChatMessage[]): void => {
+			pendingUpdatesRef.current = [];
+			replaceTranscript((version) => version + 1);
 			setMessages(localMessages);
 			rebuildToolCallIndex(localMessages, toolCallIndexRef.current);
 			setIsSending(false);
@@ -597,6 +602,7 @@ export function useAgentMessages(
 	return {
 		messages,
 		isSending,
+		transcriptVersion,
 		sendMessage,
 		clearMessages,
 		setInitialMessages,

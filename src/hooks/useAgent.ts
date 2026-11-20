@@ -45,6 +45,7 @@ export interface UseAgentReturn {
 	// Message state
 	messages: ChatMessage[];
 	isSending: boolean;
+	transcriptVersion: number;
 
 	// Combined error
 	errorInfo: ErrorInfo | null;
@@ -146,13 +147,24 @@ export function useAgent(
 
 	const handleSessionUpdate = useCallback(
 		(update: SessionUpdate) => {
+			const owner = agentSession.getUpdateOwner();
+			if (
+				owner &&
+				update.type !== "process_error" &&
+				update.sessionId !== owner
+			)
+				return;
 			// Session-level updates (commands, mode, config, usage, error)
 			agentSession.handleSessionUpdate(update);
 
 			// Message-level updates (batched via RAF, ignoreUpdates checked internally)
 			agentMessages.enqueueUpdate(update);
 		},
-		[agentSession.handleSessionUpdate, agentMessages.enqueueUpdate],
+		[
+			agentSession.getUpdateOwner,
+			agentSession.handleSessionUpdate,
+			agentMessages.enqueueUpdate,
+		],
 	);
 
 	// Composed cancel: session-level cancel + message-level RAF cleanup
@@ -180,6 +192,7 @@ export function useAgent(
 			// Message state
 			messages: agentMessages.messages,
 			isSending: agentMessages.isSending,
+			transcriptVersion: agentMessages.transcriptVersion,
 
 			// Combined error
 			errorInfo,
@@ -217,6 +230,7 @@ export function useAgent(
 			agentSession.isReady,
 			agentMessages.messages,
 			agentMessages.isSending,
+			agentMessages.transcriptVersion,
 			errorInfo,
 			agentSession.createSession,
 			agentSession.restartSession,
