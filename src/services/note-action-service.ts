@@ -62,6 +62,7 @@ export class NoteActionService {
 		path: string,
 		before: string,
 		after: string,
+		owns: () => boolean,
 	): Promise<void> {
 		const file = this.vault.getAbstractFileByPath(path);
 		if (!(file instanceof TFile) || file.path !== path)
@@ -69,6 +70,8 @@ export class NoteActionService {
 		if (typeof this.vault.process !== "function")
 			throw new Conflict("Atomic note editing is unavailable");
 		await this.vault.process(file, (current) => {
+			if (!owns())
+				throw new Conflict("The originating conversation changed");
 			if (!this.canWrite(path, before))
 				throw new Conflict("Unsaved changes in the destination editor");
 			if (file.path !== path || current !== before)
@@ -79,6 +82,7 @@ export class NoteActionService {
 	apply(
 		sessionId: string,
 		proposal: NoteEditProposal,
+		owns = () => true,
 	): Promise<WriteReceipt> {
 		if (!proposalIsValid(proposal))
 			return Promise.reject(new Error("Invalid note proposal"));
@@ -101,9 +105,13 @@ export class NoteActionService {
 				return previous.receipt;
 			}
 			await this.storage.assertNoUnresolvedWrite(frozen.path);
+			if (!owns())
+				throw new Conflict("The originating conversation changed");
 			await this.record(sessionId, frozen, "pending");
 			let status: WriteReceipt["status"];
 			try {
+				if (!owns())
+					throw new Conflict("The originating conversation changed");
 				if (frozen.before === null) {
 					if (this.vault.getAbstractFileByPath(frozen.path))
 						throw new Conflict("The new note already exists");
@@ -113,6 +121,7 @@ export class NoteActionService {
 						frozen.path,
 						frozen.before,
 						frozen.after,
+						owns,
 					);
 				status =
 					(await this.read(frozen.path)) === frozen.after
@@ -153,7 +162,11 @@ export class NoteActionService {
 			);
 		});
 	}
-	async undo(sessionId: string, id: string): Promise<WriteReceipt> {
+	async undo(
+		sessionId: string,
+		id: string,
+		owns = () => true,
+	): Promise<WriteReceipt> {
 		const entry = (await this.storage.load(sessionId))?.operations.find(
 			(row) => row.proposal.id === id,
 		);
@@ -169,6 +182,8 @@ export class NoteActionService {
 			if (proposal.before === null)
 				throw new Error("Created notes must be removed manually");
 			await this.storage.assertNoUnresolvedWrite(proposal.path);
+			if (!owns())
+				throw new Conflict("The originating conversation changed");
 			await this.record(sessionId, proposal, "undo-pending");
 			let status: WriteReceipt["status"];
 			try {
@@ -176,6 +191,7 @@ export class NoteActionService {
 					proposal.path,
 					proposal.after,
 					proposal.before,
+					owns,
 				);
 				status =
 					(await this.read(proposal.path)) === proposal.before

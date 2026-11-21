@@ -1623,9 +1623,42 @@ If your plugin does not need CSS, delete this file.
 	transition: opacity 0.15s ease;
 }
 
-.agent-client-message-renderer:hover .agent-client-message-actions {
+.agent-client-message-renderer:hover .agent-client-message-actions,
+.agent-client-message-renderer:focus-within .agent-client-message-actions {
 	opacity: 1;
 	pointer-events: auto;
+}
+
+.xo-reply-actions {
+	margin-block: 0.5em 0.25em;
+	min-width: 0;
+}
+
+.xo-reply-actions button,
+.xo-reply-diff strong {
+	max-width: 100%;
+	height: auto;
+	white-space: normal;
+	overflow-wrap: anywhere;
+}
+
+.xo-reply-diff {
+	padding: var(--size-4-2);
+	margin-block-end: var(--size-4-2);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	background: var(--background-secondary);
+	min-width: 0;
+}
+
+.xo-reply-diff-lines,
+.xo-reply-diff pre {
+	max-height: 16em;
+	overflow: auto;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-smaller);
 }
 
 .agent-client-message-action-button {

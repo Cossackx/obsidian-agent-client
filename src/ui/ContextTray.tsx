@@ -37,6 +37,7 @@ import {
 	type SynthesisPurpose,
 } from "../services/synthesis-request";
 import { NoteActionModal } from "./NoteActionModal";
+import type { ReplyProposal } from "./ReplyNoteActions";
 import { useChatContext } from "./ChatContext";
 import { mapStoredRange } from "../utils/selection";
 import { getVaultDragFiles } from "../utils/vault-drag";
@@ -112,7 +113,7 @@ export function ContextTray({
 	busy,
 	send,
 	openContinuity,
-	boundReplyId,
+	onProposals,
 	onClose,
 }: {
 	companion: ReturnType<typeof useNoteCompanion>;
@@ -131,8 +132,7 @@ export function ContextTray({
 	busy: boolean;
 	send: (turn: StructuredTurn) => Promise<boolean>;
 	openContinuity: () => Promise<void>;
-	/** Reply chosen from its own bubble; never re-resolved to "latest". */
-	boundReplyId?: string | null;
+	onProposals: (rows: ReplyProposal[]) => void;
 	onClose: () => void;
 }) {
 	const { plugin, vaultService } = useChatContext();
@@ -156,11 +156,7 @@ export function ContextTray({
 	const [working, setWorking] = React.useState(false);
 	const lock = React.useRef(false);
 	const [message, setMessage] = React.useState("");
-	const [proposals, setProposals] = React.useState<{
-		sessionId: string;
-		rows: { proposal: NoteEditProposal; comment?: string }[];
-	} | null>(null);
-	const [replyId, setReplyId] = React.useState(boundReplyId ?? "");
+	const [replyId, setReplyId] = React.useState("");
 	const [excerpt, setExcerpt] = React.useState<{
 		messageId: string;
 		start: number;
@@ -178,12 +174,7 @@ export function ContextTray({
 			row.role === "assistant" &&
 			row.content.some((c) => c.type === "text"),
 	);
-	React.useEffect(() => {
-		if (boundReplyId) {
-			setReplyId(boundReplyId);
-			setExcerpt(null);
-		}
-	}, [boundReplyId]);
+
 	const reply = replyId
 		? replies.find((row) => row.id === replyId)
 		: replies[replies.length - 1];
@@ -499,7 +490,6 @@ export function ContextTray({
 			throw new Error(
 				"A passage exceeds the configured selection limit; capture a smaller excerpt.",
 			);
-		setProposals(null);
 		await send({
 			text: passagePrompt,
 			intent: "Review captured passages",
@@ -526,7 +516,10 @@ export function ContextTray({
 								: [];
 						},
 					);
-					setProposals({ sessionId, rows });
+					onProposals(rows);
+					setMessage(
+						"Review the proposed changes on the reply below.",
+					);
 				} catch {
 					setMessage(
 						"Reply did not match the requested passages. No write actions were created.",
@@ -620,17 +613,26 @@ export function ContextTray({
 			text: buildCapturePrompt(intent, reply.id, target),
 			intent: `Request editorial proposal (${intent}) for ${target.path}`,
 			quotes,
-			onReply: (result) => {
+			onReply: (result, generatedId) => {
 				if (current.current !== sessionId) return;
 				try {
-					preview(
-						validateCaptureProposal(
-							result,
-							intent,
-							target,
-							original,
-							reply.id,
-						),
+					const proposal = validateCaptureProposal(
+						result,
+						intent,
+						target,
+						original,
+						reply.id,
+					);
+					onProposals([
+						{
+							proposal: {
+								...proposal,
+								sourceMessageId: generatedId,
+							},
+						},
+					]);
+					setMessage(
+						"Review the proposed changes on the reply below.",
 					);
 				} catch {
 					setMessage(
@@ -1073,39 +1075,7 @@ export function ContextTray({
 							</button>
 						</div>
 					</details>
-					{proposals?.sessionId === sessionId &&
-						proposals?.rows.map(({ proposal, comment }) => (
-							<div key={proposal.id} className="xo-note-chip">
-								<strong>{proposal.path}</strong>
-								{comment && <p>{comment}</p>}
-								<button
-									type="button"
-									onClick={() => preview(proposal)}
-								>
-									Review revision
-								</button>
-								<button
-									type="button"
-									onClick={() =>
-										setProposals((old) =>
-											old
-												? {
-														...old,
-														rows: old.rows.filter(
-															(row) =>
-																row.proposal
-																	.id !==
-																proposal.id,
-														),
-													}
-												: old,
-										)
-									}
-								>
-									Skip
-								</button>
-							</div>
-						))}
+
 					<details>
 						<summary>Place a reply in a note</summary>
 						<div className="xo-note-row">

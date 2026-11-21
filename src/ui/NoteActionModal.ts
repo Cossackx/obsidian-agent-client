@@ -65,7 +65,7 @@ export class NoteActionModal extends Modal {
 			cancel.disabled = true;
 			status.setText("Checking the saved preimage and applying…");
 			void this.plugin.noteActions
-				.apply(this.sessionId, proposal)
+				.apply(this.sessionId, proposal, this.current)
 				.then(
 					(receipt) => {
 						this.onReceipt(receipt);

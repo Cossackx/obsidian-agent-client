@@ -21,7 +21,7 @@ const SHOW_SETTLE_MS = 500;
  */
 export interface MessageListProps {
 	/** Opens note tools bound to this agent reply. */
-	onUseReply?: (messageId: string) => void;
+	renderReplyActions?: (message: ChatMessage) => React.ReactNode;
 	/** All messages in the current chat session */
 	messages: ChatMessage[];
 	/** Whether a message is currently being sent */
@@ -70,7 +70,7 @@ export function MessageList({
 	expandedToolCalls,
 	onToggleToolCall,
 	hasActivePermission,
-	onUseReply,
+	renderReplyActions,
 }: MessageListProps) {
 	const containerRef = useRef<HTMLDivElement>(null);
 	const [isAtBottom, setIsAtBottom] = useState(true);
@@ -277,7 +277,7 @@ export function MessageList({
 								terminalClient={terminalClient}
 								expandedToolCalls={expandedToolCalls}
 								onToggleToolCall={onToggleToolCall}
-								onUseReply={onUseReply}
+								renderReplyActions={renderReplyActions}
 							/>
 						</div>
 					);

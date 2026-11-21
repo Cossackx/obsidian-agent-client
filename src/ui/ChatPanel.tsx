@@ -45,6 +45,9 @@ import { useCompanionComposer } from "../hooks/useCompanionComposer";
 import type { SavedSessionInfo } from "../types/session";
 import type { ContextItem } from "../types/note-companion";
 import { ContextTray, type StructuredTurn } from "./ContextTray";
+import { ReplyNoteActions, type ReplyProposal } from "./ReplyNoteActions";
+import { insertReply } from "../services/reply-note-action";
+import { chooseReplyTarget } from "./ReplyTargetPicker";
 import { readCorrelatedReply } from "../services/passage-review";
 import { confirmPayload } from "./ContextPreviewModal";
 import { ComposerContext } from "./ComposerContext";
@@ -649,7 +652,16 @@ export const ChatPanel = React.memo(function ChatPanel({
 		[suggestions, followSuppressed],
 	);
 	const [toolsOpen, setToolsOpen] = useState(false);
-	const [boundReply, setBoundReply] = useState<string | null>(null);
+	const [replyProposals, setReplyProposals] = useState<
+		{ rows: ReplyProposal[]; current: () => boolean }[]
+	>([]);
+	const recordReplyProposals = (rows: ReplyProposal[]) => {
+		if (ownsComposer())
+			setReplyProposals((old) => [
+				...old.filter((entry) => entry.current()),
+				{ rows, current: ownsComposer },
+			]);
+	};
 	const reviewNext = useRef(false);
 	const actions = useChatActions(
 		plugin,
@@ -1967,6 +1979,117 @@ export const ChatPanel = React.memo(function ChatPanel({
 			/>
 		) : null;
 
+	const renderReplyActions = (message: ChatMessage) => {
+		const state = companion.state;
+		if (
+			!state ||
+			!message.content.some(
+				(part) => part.type === "text" && part.text.trim(),
+			)
+		)
+			return null;
+		const receipts = state.operations.filter(
+			({ proposal }) => proposal.sourceMessageId === message.id,
+		);
+		const recorded = new Set(receipts.map(({ proposal }) => proposal.id));
+		const proposals = replyProposals
+			.filter((entry) => entry.current())
+			.flatMap((entry) => entry.rows)
+			.filter(
+				({ proposal }) =>
+					proposal.sourceMessageId === message.id &&
+					!recorded.has(proposal.id),
+			);
+		const current = () =>
+			canMutate() &&
+			messagesRef.current.some(
+				(row) => row.id === message.id && row.role === "assistant",
+			);
+		const act = (work: () => Promise<unknown>) =>
+			void runMutation(work, current).catch(
+				(error: unknown) =>
+					new Notice(
+						error instanceof Error
+							? error.message
+							: "Note action did not complete; check its receipt before retrying.",
+					),
+			);
+		const target = state.destination;
+		const insertLabel =
+			target?.kind === "end"
+				? `Append to ${target.path}`
+				: target?.kind === "heading"
+					? `Append to ${target.path} › ${target.heading} (${target.occurrence})`
+					: "Insert in note…";
+		return (
+			<ReplyNoteActions
+				insertLabel={insertLabel}
+				proposals={proposals}
+				receipts={receipts}
+				disabled={
+					mutating ||
+					previewing ||
+					isSending ||
+					sessionHistory.loading
+				}
+				onInsert={() =>
+					act(() =>
+						insertReply({
+							sessionId: state.sessionId,
+							message,
+							destination: target,
+							current,
+							read: (path) => vaultService.readNote(path),
+							apply: (id, proposal, owns) =>
+								plugin.noteActions.apply(id, proposal, owns),
+							choose: async () => {
+								const caret =
+									await vaultService.captureActiveSelection(
+										true,
+									);
+								if (!current()) return null;
+								return chooseReplyTarget(
+									plugin.app,
+									caret &&
+										caret.range.start === caret.range.end
+										? { ...caret, kind: "caret" }
+										: undefined,
+								);
+							},
+						}),
+					)
+				}
+				onAccept={(proposal) =>
+					act(() =>
+						plugin.noteActions.apply(
+							state.sessionId,
+							proposal,
+							current,
+						),
+					)
+				}
+				onCancel={(id) => {
+					if (current() && !mutations.busy)
+						setReplyProposals((old) =>
+							old.map((entry) => ({
+								...entry,
+								rows: entry.rows.filter(
+									({ proposal }) => proposal.id !== id,
+								),
+							})),
+						);
+				}}
+				onUndo={(id) =>
+					act(() =>
+						plugin.noteActions.undo(state.sessionId, id, current),
+					)
+				}
+				onReconcile={(id) =>
+					act(() => plugin.noteActions.reconcile(state.sessionId, id))
+				}
+			/>
+		);
+	};
 	const messageListElement = (
 		<MessageList
 			messages={messages}
@@ -1980,10 +2103,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 			expandedToolCalls={expandedToolCalls}
 			onToggleToolCall={toggleToolCall}
 			hasActivePermission={agent.hasActivePermission}
-			onUseReply={(id) => {
-				setBoundReply(id);
-				setToolsOpen(true);
-			}}
+			renderReplyActions={renderReplyActions}
 		/>
 	);
 
@@ -2138,11 +2258,8 @@ export const ChatPanel = React.memo(function ChatPanel({
 					ownsComposer={ownsComposer}
 					runMutation={runMutation}
 					guardedUpdate={guardedUpdate}
-					boundReplyId={boundReply}
-					onClose={() => {
-						setToolsOpen(false);
-						setBoundReply(null);
-					}}
+					onProposals={recordReplyProposals}
+					onClose={() => setToolsOpen(false)}
 					messages={messages}
 					canSend={isSessionReady && !reconnecting}
 					busy={
