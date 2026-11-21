@@ -104,6 +104,9 @@ function choose<T>(
 
 export function ContextTray({
 	companion,
+	ownsComposer,
+	runMutation,
+	guardedUpdate,
 	messages,
 	canSend,
 	busy,
@@ -113,6 +116,16 @@ export function ContextTray({
 	onClose,
 }: {
 	companion: ReturnType<typeof useNoteCompanion>;
+	ownsComposer: () => boolean;
+	runMutation: <T>(
+		work: () => Promise<T>,
+		surfaceAlive: () => boolean,
+	) => Promise<T>;
+	guardedUpdate: (
+		change: Parameters<ReturnType<typeof useNoteCompanion>["update"]>[0],
+		kind: string,
+		surfaceAlive: () => boolean,
+	) => Promise<void>;
 	messages: ChatMessage[];
 	canSend: boolean;
 	busy: boolean;
@@ -124,16 +137,22 @@ export function ContextTray({
 }) {
 	const { plugin, vaultService } = useChatContext();
 	const { app } = plugin;
-	const { state, update } = companion;
+	const { state } = companion;
 	const sessionId = state?.sessionId;
 	const current = React.useRef<string | undefined>(sessionId);
 	current.current = sessionId;
-	React.useEffect(
+	React.useLayoutEffect(
 		() => () => {
 			current.current = undefined;
 		},
 		[],
 	);
+	const surfaceAlive = () =>
+		!!sessionId && current.current === sessionId && ownsComposer();
+	const update = (
+		change: Parameters<typeof companion.update>[0],
+		kind: string,
+	) => guardedUpdate(change, kind, surfaceAlive);
 	const [working, setWorking] = React.useState(false);
 	const lock = React.useRef(false);
 	const [message, setMessage] = React.useState("");
@@ -176,12 +195,12 @@ export function ContextTray({
 		excerpt && excerpt.messageId === reply?.id
 			? fullReply.slice(excerpt.start, excerpt.end)
 			: fullReply;
-	const run = (work: () => Promise<unknown>) => {
+	const run = (work: () => Promise<unknown>, serialize = true) => {
 		if (lock.current) return;
 		lock.current = true;
 		setWorking(true);
 		setMessage("");
-		void work()
+		void (serialize ? runMutation(work, surfaceAlive) : work())
 			.catch((error: unknown) =>
 				setMessage(
 					error instanceof Error
@@ -255,11 +274,13 @@ export function ContextTray({
 			type="button"
 			disabled={!canSend || working || busy}
 			onClick={() =>
-				run(() =>
-					send({
-						text: `${text} Do not invoke tools or edit files.`,
-						intent: label,
-					}),
+				run(
+					() =>
+						send({
+							text: `${text} Do not invoke tools or edit files.`,
+							intent: label,
+						}),
+					false,
 				)
 			}
 		>
@@ -410,7 +431,7 @@ export function ContextTray({
 			plugin,
 			sessionId,
 			proposal,
-			() => current.current === sessionId,
+			surfaceAlive,
 			(receipt) => {
 				if (current.current !== sessionId) return;
 				setMessage(`${receipt.path}: ${receipt.status}`);
@@ -651,14 +672,17 @@ export function ContextTray({
 				<button
 					type="button"
 					disabled={working || busy}
-					onClick={() => run(openContinuity)}
+					onClick={() => run(openContinuity, false)}
 				>
 					Note conversations
 				</button>
 				<button
 					type="button"
 					aria-label="Close note tools"
-					onClick={onClose}
+					onClick={() => {
+						current.current = undefined;
+						onClose();
+					}}
 				>
 					Close
 				</button>
@@ -842,7 +866,7 @@ export function ContextTray({
 						<button
 							type="button"
 							disabled={!canSend || working || busy}
-							onClick={() => run(review)}
+							onClick={() => run(review, false)}
 						>
 							Review passages
 						</button>
@@ -865,7 +889,7 @@ export function ContextTray({
 						<button
 							type="button"
 							disabled={!canSend || working || busy}
-							onClick={() => run(synthesize)}
+							onClick={() => run(synthesize, false)}
 						>
 							Bring these together
 						</button>
@@ -1042,7 +1066,7 @@ export function ContextTray({
 									state.destination?.kind !== "heading"
 								}
 								onClick={() =>
-									run(() => editorial("merge-section"))
+									run(() => editorial("merge-section"), false)
 								}
 							>
 								Update the brief
@@ -1270,7 +1294,10 @@ export function ContextTray({
 													!canSend || working || busy
 												}
 												onClick={() =>
-													run(() => editorial(intent))
+													run(
+														() => editorial(intent),
+														false,
+													)
 												}
 											>
 												{label}
@@ -1339,8 +1366,7 @@ export function ContextTray({
 																);
 															if (
 																!confirmed ||
-																current.current !==
-																	state.sessionId
+																!surfaceAlive()
 															)
 																return;
 															const result =

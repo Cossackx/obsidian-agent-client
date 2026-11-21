@@ -54,6 +54,10 @@ import {
 } from "../services/companion-presentation";
 import { putItem, refreshItem } from "../services/companion-state";
 import {
+	CompanionMutationGate,
+	guardCompanionChange,
+} from "../services/companion-mutation";
+import {
 	decideSendReview,
 	representedItems,
 	type RepresentedSource,
@@ -387,7 +391,9 @@ export const ChatPanel = React.memo(function ChatPanel({
 	const composer = useCompanionComposer(session.sessionId);
 	const { companion, inputValue, attachedFiles } = composer;
 	const ownsComposer = () =>
-		composer.ownsComposer() && !changingOwner.current;
+		composer.ownsComposer() &&
+		publishedId.current === session.sessionId &&
+		!changingOwner.current;
 	const updateCompanionDraft = (text: string) => {
 		if (ownsComposer()) composer.changeDraft(text);
 	};
@@ -402,12 +408,42 @@ export const ChatPanel = React.memo(function ChatPanel({
 	const changingOwner = useRef(false);
 	const busySending = useRef(isSending);
 	busySending.current = isSending;
+	const [mutations] = useState(() => new CompanionMutationGate());
+	const [mutating, setMutating] = useState(false);
+	const canMutate = () =>
+		ownsComposer() && !preparingCompanion.current && !busySending.current;
+	const runMutation = async <T,>(
+		work: () => Promise<T>,
+		surfaceAlive = () => true,
+	) =>
+		mutations.run(
+			() => canMutate() && surfaceAlive(),
+			async () => {
+				setMutating(true);
+				try {
+					return await work();
+				} finally {
+					if (mounted.current) setMutating(false);
+				}
+			},
+		);
+	const guardedUpdate = (
+		change: Parameters<typeof companion.update>[0],
+		kind: string,
+		surfaceAlive = () => true,
+	) => {
+		return companion.update(
+			guardCompanionChange(() => canMutate() && surfaceAlive(), change),
+			kind,
+		);
+	};
 	const flushDraft = companion.flush;
 	const invalidateComposer = composer.invalidate;
 	const prepareRestore = useCallback(async () => {
 		if (
 			changingOwner.current ||
 			preparingCompanion.current ||
+			mutations.busy ||
 			busySending.current
 		)
 			throw new Error(
@@ -425,7 +461,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 			throw error;
 		}
 		return finish;
-	}, [flushDraft, invalidateComposer]);
+	}, [flushDraft, invalidateComposer, mutations]);
 	const withRestoreOwner = useRestoreOwner(
 		plugin.viewRegistry,
 		viewId,
@@ -681,6 +717,12 @@ export const ChatPanel = React.memo(function ChatPanel({
 		turn?: StructuredTurn,
 	) => {
 		setGeminiNoticeDismissed(true);
+		if (mutations.busy) {
+			new Notice(
+				"Wait for the current context action to finish before sending.",
+			);
+			return false;
+		}
 		if (
 			!isSessionReady ||
 			isSending ||
@@ -700,15 +742,19 @@ export const ChatPanel = React.memo(function ChatPanel({
 		reviewNext.current = false;
 		const requestId = turn?.onReply ? crypto.randomUUID() : undefined;
 		try {
-			const items = [...(turn?.items ?? snapshot?.items ?? [])];
-			if (snapshot?.destination)
+			const current =
+				(await plugin.companionStorage.load(snapshot.sessionId)) ??
+				snapshot;
+			if (!ownsComposer()) return false;
+			const items = [...(turn?.items ?? current.items)];
+			if (current.destination)
 				items.push({
 					id: "destination",
 					role: "destination",
 					lifetime: "session",
 					scope: { kind: "note" },
 					source: {
-						path: snapshot.destination.path,
+						path: current.destination.path,
 						text: "",
 						capturedAt: 0,
 					},
@@ -736,7 +782,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 				}),
 			);
 			const prepared = prepareContext(assessed, {
-				excludedPaths: snapshot.items
+				excludedPaths: current.items
 					.filter((item) => item.role === "destination")
 					.map((item) => item.source.path),
 				quotes: turn?.quotes,
@@ -872,14 +918,30 @@ export const ChatPanel = React.memo(function ChatPanel({
 	// Sidebar-specific: handleNewChat wrapper that persists agent ID
 	// ============================================================
 	const handleNewChatWithPersist = useCallback(
-		async (requestedAgentId?: string, forceFresh = false) => {
-			await handleNewChat(requestedAgentId, forceFresh);
-			// Persist agent ID for this view (survives Obsidian restart)
-			if (requestedAgentId) {
-				onAgentIdChanged?.(requestedAgentId);
+		async (
+			requestedAgentId?: string,
+			forceFresh = false,
+			transitioning = false,
+		) => {
+			let finish: (() => void) | undefined;
+			try {
+				if (!transitioning) finish = await prepareRestore();
+				if (!mounted.current) return;
+				await handleNewChat(requestedAgentId, forceFresh);
+				if (requestedAgentId) onAgentIdChanged?.(requestedAgentId);
+			} catch (error) {
+				if (transitioning) throw error;
+				if (mounted.current)
+					new Notice(
+						error instanceof Error
+							? error.message
+							: "Could not open a new conversation.",
+					);
+			} finally {
+				finish?.();
 			}
 		},
-		[handleNewChat, onAgentIdChanged],
+		[handleNewChat, onAgentIdChanged, prepareRestore],
 	);
 
 	// ============================================================
@@ -2072,6 +2134,9 @@ export const ChatPanel = React.memo(function ChatPanel({
 				<ContextTray
 					key={session.sessionId ?? "unbound"}
 					companion={companion}
+					ownsComposer={ownsComposer}
+					runMutation={runMutation}
+					guardedUpdate={guardedUpdate}
 					boundReplyId={boundReply}
 					onClose={() => {
 						setToolsOpen(false);
@@ -2081,6 +2146,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 					canSend={isSessionReady && !reconnecting}
 					busy={
 						previewing ||
+						mutating ||
 						isSending ||
 						reconnecting ||
 						sessionHistory.loading
@@ -2107,7 +2173,8 @@ export const ChatPanel = React.memo(function ChatPanel({
 									!ownsComposer() ||
 									changingOwner.current ||
 									preparingCompanion.current ||
-									isSending
+									mutations.busy ||
+									busySending.current
 								)
 									return;
 								changingOwner.current = true;
@@ -2118,6 +2185,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 									if (!mounted.current) return;
 									await handleNewChatWithPersist(
 										undefined,
+										true,
 										true,
 									);
 									if (!mounted.current) return;
@@ -2220,13 +2288,13 @@ export const ChatPanel = React.memo(function ChatPanel({
 	const editChip = async (chip: ComposerChip) => {
 		if (!companion.state || !ownsComposer()) return;
 		if (chip.kind === "following") {
-			await companion.update(
+			await guardedUpdate(
 				(old) => ({ ...old, followDismissed: true }),
 				"follow",
 			);
 			return;
 		}
-		await companion.update(
+		await guardedUpdate(
 			(old) => ({
 				...old,
 				items: old.items.filter((row) => row.id !== chip.itemId),
@@ -2238,25 +2306,46 @@ export const ChatPanel = React.memo(function ChatPanel({
 		const sessionId = companion.state?.sessionId;
 		if (!sessionId || !ownsComposer()) return;
 		if (chip.kind === "following") {
-			const text = await vaultService.readNote(chip.path);
-			await companion.update(
+			const selection = suggestions.mentions.activeNote?.selection;
+			const captured = selection
+				? await vaultService.captureActiveSelection()
+				: null;
+			if (
+				selection &&
+				(!captured ||
+					captured.path !== chip.path ||
+					!selection.range ||
+					captured.range.start !== selection.range.start ||
+					captured.range.end !== selection.range.end ||
+					captured.text.slice(
+						captured.range.start,
+						captured.range.end,
+					) !== selection.text)
+			)
+				throw new Error(
+					"Selection changed. Pin the current selection again.",
+				);
+			const source = captured ?? {
+				path: chip.path,
+				text: await vaultService.readNote(chip.path),
+				capturedAt: Date.now(),
+			};
+			await guardedUpdate(
 				(old) =>
 					putItem(old, {
 						id: crypto.randomUUID(),
-						source: {
-							path: chip.path,
-							text,
-							capturedAt: Date.now(),
-						},
+						source,
 						role: "working",
 						lifetime: "session",
-						scope: { kind: "note" },
+						scope: captured
+							? { kind: "passage", range: captured.range }
+							: { kind: "note" },
 					}),
 				`add:${crypto.randomUUID()}`,
 			);
 			return;
 		}
-		await companion.update(
+		await guardedUpdate(
 			(old) => ({
 				...old,
 				items: old.items.map((row) =>
@@ -2284,18 +2373,22 @@ export const ChatPanel = React.memo(function ChatPanel({
 			text: await vaultService.readNote(item.source.path),
 			capturedAt: Date.now(),
 		});
-		await companion.update(
+		await guardedUpdate(
 			(old) => ({
 				...old,
 				items: old.items.map((row) =>
-					row.id === item.id ? { ...row, ...change } : row,
+					row.id === item.id &&
+					row.source.path === item.source.path &&
+					row.source.capturedAt === item.source.capturedAt
+						? { ...row, ...change }
+						: row,
 				),
 			}),
 			`item:${item.id}:capture`,
 		);
 	};
 	const chipWork = (work: () => Promise<unknown>) =>
-		void work().catch(
+		void runMutation(work).catch(
 			(error: unknown) =>
 				new Notice(
 					error instanceof Error
@@ -2306,7 +2399,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 	const contextRow = companion.state ? (
 		<ComposerContext
 			chips={contextChips}
-			disabled={previewing || isSending || reconnecting}
+			disabled={previewing || isSending || reconnecting || mutating}
 			toolsOpen={toolsOpen}
 			onRemove={(chip) => chipWork(() => editChip(chip))}
 			onTogglePin={(chip) => chipWork(() => pinChip(chip))}
@@ -2327,7 +2420,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 					menu.addItem((item: MenuItem) =>
 						item.setTitle("Follow active note again").onClick(() =>
 							chipWork(() =>
-								companion.update(
+								guardedUpdate(
 									(old) => ({
 										...old,
 										followDismissed: false,

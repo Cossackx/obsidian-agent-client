@@ -6,6 +6,7 @@ import {
 	emptyCompanion,
 } from "../services/companion-state";
 import { useChatContext } from "../ui/ChatContext";
+import { CompanionMutationExpired } from "../services/companion-mutation";
 
 type Change = (state: CompanionState) => CompanionState;
 export function useNoteCompanion(
@@ -114,6 +115,12 @@ export function useNoteCompanion(
 						setWarning("");
 				}
 			} catch (error) {
+				if (error instanceof CompanionMutationExpired) {
+					if (revisions.current.get(key) === revision)
+						failed.current.delete(key);
+					if (retryRevision === undefined) throw error;
+					return;
+				}
 				if (active.current === id)
 					setWarning(
 						readbackUnavailable

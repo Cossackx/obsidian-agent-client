@@ -17,6 +17,11 @@ import { useSessionHistory } from "../src/hooks/useSessionHistory";
 import { useHistoryModal } from "../src/hooks/useHistoryModal";
 import { usePersistentEmbedRestore } from "../src/hooks/usePersistentEmbedRestore";
 import { CompanionStorage } from "../src/services/companion-storage";
+import {
+	CompanionMutationExpired,
+	CompanionMutationGate,
+	guardCompanionChange,
+} from "../src/services/companion-mutation";
 import { prepareContext } from "../src/services/context-builder";
 import { compareSource } from "../src/services/source-comparison";
 import { preparePrompt } from "../src/services/message-sender";
@@ -90,6 +95,45 @@ function deferred() {
 	});
 	return { resolve, promise };
 }
+
+it.each(["send", "close", "same-ID restore", "owner switch"])(
+	"delayed context capture is serialized and bound across %s",
+	async (race) => {
+		const disk = fixture();
+		const gate = new CompanionMutationGate();
+		let id = "A";
+		const view = await mount(() => useCompanionComposer(id), disk.store);
+		const original = view.current;
+		const wait = deferred();
+		const transform = vi.fn((old) => ({ ...old, followDismissed: true }));
+		const capture = gate.run(original.ownsComposer, async () => {
+			await wait.promise;
+			return disk.store.update(
+				"A",
+				guardCompanionChange(original.ownsComposer, transform),
+			);
+		});
+		const result = capture.catch((error: unknown) => error);
+		expect(gate.busy).toBe(true);
+		await expect(
+			gate.run(original.ownsComposer, async () => undefined),
+		).rejects.toThrow("current context action");
+		if (race === "close") await view.close();
+		else if (race === "same-ID restore") original.invalidate();
+		else if (race === "owner switch") {
+			id = "B";
+			await view.render();
+		}
+		wait.resolve();
+		if (race === "send")
+			await act(async () => {
+				await capture;
+			});
+		else expect(await result).toBeInstanceOf(CompanionMutationExpired);
+		expect(transform).toHaveBeenCalledTimes(race === "send" ? 1 : 0);
+		expect(gate.busy).toBe(false);
+	},
+);
 function fixture() {
 	const files = new Map<string, string>();
 	let fail = false;
