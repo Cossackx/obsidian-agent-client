@@ -583,10 +583,12 @@ export function ContextTray({
 			intent === "new-note"
 				? undefined
 				: chosen &&
-					  JSON.stringify(chosen.anchor) === JSON.stringify(target) &&
+					  JSON.stringify(chosen.anchor) ===
+							JSON.stringify(target) &&
 					  chosen.file instanceof TFile &&
 					  chosen.file.path === target.path &&
-					  app.vault.getAbstractFileByPath(target.path) === chosen.file
+					  app.vault.getAbstractFileByPath(target.path) ===
+							chosen.file
 					? chosen.file
 					: null;
 		if (file === null)

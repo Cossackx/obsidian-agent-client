@@ -90,7 +90,7 @@ export async function stageEditorSelection(
 		checkSource();
 	};
 	check();
-	await owner.stage(source, range, purpose, check, file);
+	await owner.stage(source, range, purpose, check, ...(file ? [file] : []));
 }
 
 const editSeed = "Suggest a revision to the selected passage.";

@@ -725,20 +725,26 @@ export const ChatPanel = React.memo(function ChatPanel({
 				try {
 					selectionBindings.current.set(
 						row.proposal.id,
-						plugin.bindSelectionPreimage(row.proposal.path, row.file),
+						plugin.bindSelectionPreimage(
+							row.proposal.path,
+							row.file,
+						),
 					);
 				} catch {
 					// Unbound: Accept refuses and asks for a fresh selection.
 				}
 		setReplyProposals((old) => [
-				...old.filter((entry) => entry.current()),
-				{ rows, current: ownsComposer },
-			]);
+			...old.filter((entry) => entry.current()),
+			{ rows, current: ownsComposer },
+		]);
 	};
 	const selectionBindings = useRef(
 		new Map<
 			string,
-			(() => Promise<string>) & { stillTarget?: () => boolean; file?: TFile }
+			(() => Promise<string>) & {
+				stillTarget?: () => boolean;
+				file?: TFile;
+			}
 		>(),
 	);
 	const reviewNext = useRef(false);
@@ -965,7 +971,9 @@ export const ChatPanel = React.memo(function ChatPanel({
 					// Final decision: same file AND the same selected range and bytes.
 					followFresh = async () =>
 						(!original || original()) &&
-						matches(await vaultService.captureActiveSelection(true));
+						matches(
+							await vaultService.captureActiveSelection(true),
+						);
 					valid = matches(live);
 				} catch {
 					// An unverified capture is only eligible for explicit review.

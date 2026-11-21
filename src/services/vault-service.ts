@@ -323,9 +323,7 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 		return Promise.resolve(metadata);
 	}
 
-	async captureActiveSelection(
-		allowCaret = false,
-	): Promise<
+	async captureActiveSelection(allowCaret = false): Promise<
 		| (SourceSnapshot & {
 				range: TextRange;
 				stillTarget?: () => boolean;
