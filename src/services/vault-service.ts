@@ -12,10 +12,9 @@ import {
 	MarkdownView,
 	prepareFuzzySearch,
 	type EventRef,
-	type EditorSelection,
 } from "obsidian";
-import { EditorView } from "@codemirror/view";
-import { Compartment, StateEffect } from "@codemirror/state";
+import { EditorView, type ViewUpdate } from "@codemirror/view";
+import { Compartment, StateEffect, StateField } from "@codemirror/state";
 import { getLogger, Logger } from "../utils/logger";
 import type { SourceSnapshot, TextRange } from "../types/note-companion";
 import { extractSelection } from "../utils/selection";
@@ -25,6 +24,13 @@ import {
 	type LinkedNoteMetadata,
 	type LineRange,
 } from "../utils/wikilink-resolver";
+
+/** Owner of a CM document lineage: set when a load commits into it, never re-read from the view. */
+type DocOwner = { file: TFile | null };
+const docOwner = StateField.define<DocOwner>({
+	create: () => ({ file: null }),
+	update: (owner) => owner,
+});
 
 // ============================================================================
 // Port Types (from vault-access.port.ts)
@@ -156,9 +162,13 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 		file?: TFile;
 		selection: NonNullable<NoteMetadata["selection"]>;
 		snapshot?: SourceSnapshot & { range: TextRange };
+		/** Emitting editor and its document owner; the witness dies with that binding. */
+		cm: EditorView;
+		owner: DocOwner;
 	} | null = null;
 	private selectionListeners = new Set<() => void>();
 	private activeLeafRef: EventRef | null = null;
+	private fileOpenRef: EventRef | null = null;
 	private detachEditorListenerFn: (() => void) | null = null;
 	private selectionCompartment: Compartment | null = null;
 	private lastSelectionKey = "";
@@ -319,6 +329,7 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 		// Add selection if we have it stored for this file
 		if (
 			this.currentSelection &&
+			this.witnessLive() &&
 			this.currentSelection.filePath === activeFile.path
 		) {
 			// Carry the file captured with the selection; a same-path occupant
@@ -358,6 +369,11 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 		if (view?.file && view.getMode() === "source") {
 			const file = view.file;
 			const path = file.path;
+			// Refuse while the editor document still belongs to another file (load in progress).
+			const owner = (
+				view.editor as unknown as { cm?: EditorView }
+			).cm?.state.field(docOwner, false);
+			if (owner && owner.file !== file) return null;
 			const selection = view.editor.listSelections()[0];
 			if (!selection) return null;
 			const text = view.editor.getValue();
@@ -391,6 +407,7 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 		// Only the file that produced the cached selection, still at its path.
 		return note &&
 			cached?.snapshot &&
+			this.witnessLive() &&
 			cached.file &&
 			cached.filePath === note.path &&
 			file === cached.file &&
@@ -452,30 +469,29 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 			return;
 		}
 
-		const activeView =
-			this.plugin.app.workspace.getActiveViewOfType(MarkdownView);
-		this.attachToView(activeView ?? null);
+		const workspace = this.plugin.app.workspace;
+		this.attachToView(workspace.getActiveViewOfType(MarkdownView) ?? null);
 
-		this.activeLeafRef = this.plugin.app.workspace.on(
-			"active-leaf-change",
-			(leaf) => {
-				const nextView =
-					leaf?.view instanceof MarkdownView
-						? leaf.view
-						: this.plugin.app.workspace.getActiveViewOfType(
-								MarkdownView,
-							);
-				this.attachToView(nextView ?? null);
-			},
+		this.activeLeafRef = workspace.on("active-leaf-change", (leaf) => {
+			const nextView =
+				leaf?.view instanceof MarkdownView
+					? leaf.view
+					: workspace.getActiveViewOfType(MarkdownView);
+			this.attachToView(nextView ?? null);
+		});
+		// A reused leaf can load a new file (and a new CM state) without a leaf change.
+		this.fileOpenRef = workspace.on("file-open", () =>
+			this.attachToView(workspace.getActiveViewOfType(MarkdownView)),
 		);
 	}
 
 	private teardownSelectionTracking(): void {
 		this.detachEditorListener();
-		if (this.activeLeafRef) {
-			this.plugin.app.workspace.offref(this.activeLeafRef);
-			this.activeLeafRef = null;
+		for (const ref of [this.activeLeafRef, this.fileOpenRef]) {
+			if (ref) this.plugin.app.workspace.offref(ref);
 		}
+		this.activeLeafRef = null;
+		this.fileOpenRef = null;
 		this.lastSelectionKey = "";
 	}
 
@@ -487,127 +503,125 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 		this.selectionCompartment = null;
 	}
 
+	/** The witness survives only while its document lineage keeps the owner it was taken under. */
+	private witnessLive(): boolean {
+		const witness = this.currentSelection;
+		if (
+			witness &&
+			witness.cm.state.field(docOwner, false) === witness.owner &&
+			witness.owner.file === witness.file
+		) {
+			return true;
+		}
+		this.currentSelection = null;
+		return false;
+	}
+
+	/**
+	 * Attaching (focus, leaf change, file-open) only installs the listener and,
+	 * for a document lineage not seen before, records its owner. It never
+	 * captures: only a selection transaction on an owned document does.
+	 */
 	private attachToView(view: MarkdownView | null): void {
 		this.detachEditorListener();
-
-		if (!view?.file) {
-			// No markdown editor is active (e.g. the note was closed or a
-			// non-markdown view got focus). Notify listeners so they re-query
-			// the active note, and reset the key so re-attaching to a note
-			// emits again. The stored selection is kept so it is still
-			// available when focus moves to the chat panel.
-			this.lastSelectionKey = "none";
-			this.notifySelectionListeners();
-			return;
-		}
-
-		const { editor, file } = view;
-		const filePath = file.path;
-
-		if (
-			!this.lastSelectionKey.startsWith(`${filePath}:`) ||
-			this.currentSelection?.file !== file
-		) {
-			this.handleSelectionChange(filePath, null);
-		}
-
-		const emitSelection = () => {
-			// Bind file, path and editor at the event: a reused leaf may now show another note.
-			const file = view.file;
-			if (!file || view.editor !== editor) {
-				this.handleSelectionChange(null, null);
-				return;
-			}
-			const filePath = file.path;
-			if (view.getMode() !== "source") {
-				this.handleSelectionChange(filePath, null);
-				return;
-			}
-			if (editor.somethingSelected()) {
-				const selections = editor.listSelections();
-				if (selections.length > 0) {
-					const normalized = this.normalizeSelection(selections[0]);
-					this.handleSelectionChange(
-						filePath,
-						{
-							from: {
-								line: normalized.anchor.line,
-								ch: normalized.anchor.ch,
-							},
-							to: {
-								line: normalized.head.line,
-								ch: normalized.head.ch,
-							},
-						},
-						editor.getValue(),
-						file,
-					);
-					return;
-				}
-			}
-
-			const editorHasFocus = editor.hasFocus();
-			if (editorHasFocus) {
-				this.handleSelectionChange(filePath, null);
-			}
-		};
+		this.lastSelectionKey = "none";
 
 		// Access CodeMirror 6 instance from Obsidian's Editor
 		// WARNING: This uses Obsidian's internal API (editor.cm) which is not documented
 		// and may change or be removed in future versions.
 		// This is required for real-time selection change tracking via EditorView.updateListener.
 		// If this API becomes unavailable, selection tracking will silently fail.
-		const cm = (editor as unknown as { cm?: EditorView }).cm;
-		emitSelection();
-
-		if (!cm) {
-			// Fallback: CodeMirror 6 API not available
-			// This may happen if:
-			// 1. Obsidian changes its internal implementation
-			// 2. A future Obsidian version removes the 'cm' property
-			// 3. The editor is in a different mode (e.g., legacy editor)
-			getLogger().debug(
-				"[VaultService] CodeMirror 6 API not available. " +
-					"Selection change tracking will not work. " +
-					"This may be due to an Obsidian version change.",
-			);
+		const cm = view?.file
+			? (view.editor as unknown as { cm?: EditorView }).cm
+			: undefined;
+		if (!view?.file || !cm?.state) {
+			if (view?.file) {
+				getLogger().debug(
+					"[VaultService] CodeMirror 6 API not available. " +
+						"Selection change tracking will not work. " +
+						"This may be due to an Obsidian version change.",
+				);
+			}
+			// The stored selection is kept for the chat panel; listeners re-query.
+			this.notifySelectionListeners();
 			return;
 		}
 
-		// Only proceed if cm is available
-		{
-			const compartment = new Compartment();
-			this.selectionCompartment = compartment;
-			cm.dispatch({
-				effects: StateEffect.appendConfig.of(
-					compartment.of(
-						EditorView.updateListener.of((update) => {
-							if (update.selectionSet || update.docChanged) {
-								emitSelection();
-							}
-						}),
+		const loaded = view.file;
+		const compartment = new Compartment();
+		this.selectionCompartment = compartment;
+		cm.dispatch({
+			effects: StateEffect.appendConfig.of([
+				// A state without an owner is a committed load into this editor.
+				cm.state.field(docOwner, false)
+					? []
+					: docOwner.init(() => ({ file: loaded })),
+				compartment.of(
+					EditorView.updateListener.of((update) =>
+						this.onEditorUpdate(view, update),
 					),
 				),
-			});
-			this.detachEditorListenerFn = () => {
-				if (this.selectionCompartment) {
-					cm.dispatch({
-						effects: this.selectionCompartment.reconfigure([]),
-					});
-				}
-				this.selectionCompartment = null;
-			};
-		}
+			]),
+		});
+		this.detachEditorListenerFn = () => {
+			cm.dispatch({ effects: compartment.reconfigure([]) });
+		};
+		this.notifySelectionListeners();
 	}
 
-	private normalizeSelection(selection: EditorSelection) {
-		const anchor = selection.anchor;
-		const head = selection.head ?? selection.anchor;
-		const anchorFirst =
-			anchor.line < head.line ||
-			(anchor.line === head.line && anchor.ch <= head.ch);
-
-		return anchorFirst ? { anchor, head } : { anchor: head, head: anchor };
+	private onEditorUpdate(view: MarkdownView, update: ViewUpdate): void {
+		if (!update.selectionSet && !update.docChanged) return;
+		const owner = update.state.field(docOwner, false);
+		const file = view.file;
+		if (!owner) return;
+		if (owner.file !== file) {
+			// A whole-document replacement after the view's file changed commits the load.
+			const replaced = update.transactions.some((tr) => {
+				let whole = false;
+				tr.changes.iterChangedRanges((from, to) => {
+					whole ||= from === 0 && to === tr.startState.doc.length;
+				});
+				return whole;
+			});
+			if (update.docChanged && replaced) {
+				owner.file = file;
+				this.notifySelectionListeners();
+			}
+			// Otherwise the document still belongs to another file: refuse.
+			return;
+		}
+		const editor = view.editor as unknown as {
+			cm?: EditorView;
+			hasFocus(): boolean;
+		};
+		if (!file || editor.cm !== update.view) return;
+		// A doc change alone may update this document's witness, never create one.
+		if (!update.selectionSet && this.currentSelection?.owner !== owner) {
+			return;
+		}
+		const filePath = file.path;
+		if (view.getMode() !== "source") {
+			this.handleSelectionChange(filePath, null);
+			return;
+		}
+		const { doc, selection } = update.state;
+		const { from, to } = selection.main;
+		if (from === to) {
+			if (editor.hasFocus()) this.handleSelectionChange(filePath, null);
+			return;
+		}
+		const at = (pos: number): EditorPosition => {
+			const line = doc.lineAt(pos);
+			return { line: line.number - 1, ch: pos - line.from };
+		};
+		this.handleSelectionChange(
+			filePath,
+			{ from: at(from), to: at(to) },
+			doc.toString(),
+			file,
+			update.view,
+			owner,
+		);
 	}
 
 	private handleSelectionChange(
@@ -615,6 +629,8 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 		selection: { from: EditorPosition; to: EditorPosition } | null,
 		buffer?: string,
 		file?: TFile,
+		cm?: EditorView,
+		owner?: DocOwner,
 	): void {
 		const selectionKey = filePath
 			? selection
@@ -625,14 +641,15 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 		if (
 			selectionKey === this.lastSelectionKey &&
 			buffer === this.currentSelection?.snapshot?.text &&
-			file === this.currentSelection?.file
+			file === this.currentSelection?.file &&
+			cm === this.currentSelection?.cm
 		) {
 			return;
 		}
 
 		this.lastSelectionKey = selectionKey;
 
-		if (filePath && selection) {
+		if (filePath && selection && cm && owner) {
 			const excerpt =
 				buffer === undefined
 					? undefined
@@ -640,6 +657,8 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 			this.currentSelection = {
 				filePath,
 				file,
+				cm,
+				owner,
 				selection: { ...selection, ...excerpt },
 				snapshot:
 					buffer !== undefined && excerpt

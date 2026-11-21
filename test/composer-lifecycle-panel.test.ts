@@ -939,6 +939,47 @@ function openSourceEditor(
 	return view;
 }
 
+/** A real CM state on the view's editor; updates reach only listeners installed in it. */
+function trackEditor(
+	view: { editor: object },
+	doc: string,
+	anchor = 0,
+	head = anchor,
+) {
+	let state = EditorState.create({ doc, selection: { anchor, head } });
+	const cm = {
+		get state() {
+			return state;
+		},
+		dispatch(spec: TransactionSpec) {
+			const startState = state;
+			const tr = state.update(spec);
+			state = tr.state;
+			const update = {
+				startState,
+				state,
+				view: cm,
+				transactions: [tr],
+				selectionSet: !!tr.selection,
+				docChanged: tr.docChanged,
+			} as unknown as ViewUpdate;
+			for (const listener of state.facet(EditorView.updateListener)) {
+				listener(update);
+			}
+		},
+	};
+	Object.assign(view.editor, { cm });
+	return {
+		cm,
+		select: (anchor: number, head: number) =>
+			act(async () => cm.dispatch({ selection: { anchor, head } })),
+		/** Replace the CM state as a full host load does; no transaction is delivered. */
+		reset: (next: string) => {
+			state = EditorState.create({ doc: next });
+		},
+	};
+}
+
 async function clickTray(h: Mounted, label: string) {
 	const button = findBtn(h.tray, label);
 	expect(button, label).toBeDefined();
@@ -1316,11 +1357,14 @@ it.each(["stable", "refresh after swap"])(
 			captureActiveSelection: (caret?: boolean) =>
 				svc.captureActiveSelection(caret),
 		});
+		const editor = trackEditor(view, a.data.get(a.original)!);
 		const refresh = () => h.input.suggestions.mentions.updateActiveNote();
 		let off = noop;
 		await act(async () => {
 			off = svc.subscribeSelectionChanges(() => void refresh());
 		});
+		// Attaching never captures; the witness comes from a genuine selection transaction.
+		await editor.select(sel.range.start, sel.range.end);
 		const shown = () => h.input.suggestions.mentions.activeNote?.selection;
 		expect(shown()?.file).toBe(a.original);
 		if (mode !== "stable") {
@@ -1386,8 +1430,7 @@ it.each(["selection on B", "A returns before send"])(
 		a.data.set(a.original, "HEADBODY-A");
 		a.data.set(a.other, "DIFFBODY-B");
 		const view = openSourceEditor(h, a);
-		let state = EditorState.create(),
-			start = 0,
+		let start = 0,
 			active = true;
 		Object.assign(view.editor, {
 			getValue: () => a.data.get(view.file)!,
@@ -1399,12 +1442,8 @@ it.each(["selection on B", "A returns before send"])(
 					head: { line: 0, ch: start + 4 },
 				},
 			],
-			cm: {
-				dispatch: (spec: TransactionSpec) => {
-					state = state.update(spec).state;
-				},
-			},
 		});
+		const editor = trackEditor(view, a.data.get(a.original)!);
 		// The path resolves to whichever file the leaf shows now.
 		Object.assign(a.v, {
 			on: () => ({}),
@@ -1430,16 +1469,24 @@ it.each(["selection on B", "A returns before send"])(
 		await act(async () => {
 			off = svc.subscribeSelectionChanges(() => void refresh());
 		});
+		await editor.select(0, 4);
 		const shown = () => h.input.suggestions.mentions.activeNote?.selection;
 		expect(shown()?.file).toBe(a.original);
-		// The same leaf now shows B; no leaf change, only a genuine selection on B.
+		// The same leaf now shows B; no leaf change: B's load commits, then a genuine selection on B.
 		view.file = a.other;
 		start = 4;
-		const listeners = state.facet(EditorView.updateListener);
+		await act(async () =>
+			editor.cm.dispatch({
+				changes: {
+					from: 0,
+					to: editor.cm.state.doc.length,
+					insert: a.data.get(a.other),
+				},
+			}),
+		);
+		const listeners = editor.cm.state.facet(EditorView.updateListener);
 		expect(listeners).toHaveLength(1);
-		// The listener reads only these two update flags.
-		const update = { selectionSet: true, docChanged: false } as ViewUpdate;
-		await act(async () => listeners[0](update));
+		await editor.select(4, 8);
 		expect(shown()?.text).toBe("BODY");
 		expect(shown()?.file).toBe(a.other);
 		if (mode === "A returns before send") {
@@ -1457,5 +1504,130 @@ it.each(["selection on B", "A returns before send"])(
 			expect(m.confirm).not.toHaveBeenCalled();
 			expect(h.prompt).toHaveBeenCalledTimes(1);
 		} else expect(h.prompt).not.toHaveBeenCalled();
+	},
+);
+
+it.each([
+	"D2a focus on B without a selection",
+	"D2a control: genuine B selection after focus",
+	"D2b file ahead of the document",
+	"D2b control: selection after B's load commits",
+	"D2c CM state replaced, then file-open",
+])(
+	"D2 identity comes only from a selection on the owned document: %s",
+	async (mode) => {
+		const h = await mount({ follow: true });
+		const a = attachVault(h);
+		a.data.set(a.original, "HEADBODY-A");
+		a.data.set(a.other, "DIFFBODY-B");
+		const view = openSourceEditor(h, a);
+		let active = true;
+		const live = () => (view.editor as { cm: EditorView }).cm.state;
+		Object.assign(view.editor, {
+			somethingSelected: () => true,
+			hasFocus: () => active,
+			getValue: () => live().doc.toString(),
+			listSelections: () => [
+				{
+					anchor: { line: 0, ch: live().selection.main.anchor },
+					head: { line: 0, ch: live().selection.main.head },
+				},
+			],
+		});
+		Object.assign(a.v, {
+			on: () => ({}),
+			getMarkdownFiles: () => [view.file],
+			getAbstractFileByPath: () => view.file,
+		});
+		Object.assign(h.plugin.app, {
+			metadataCache: { getFileCache: () => ({}) },
+		});
+		Object.assign(h.plugin.app.workspace, {
+			getActiveViewOfType: () => (active ? view : null),
+		});
+		// Real tracker; the fixture plugin is the same shape the harness passes elsewhere.
+		const svc = new VaultService(h.plugin as never);
+		Object.assign(h.vaultAccess, {
+			getActiveNote: () => svc.getActiveNote(),
+			captureActiveSelection: (caret?: boolean) =>
+				svc.captureActiveSelection(caret),
+		});
+		const editorA = trackEditor(view, a.data.get(a.original)!);
+		const refresh = () => h.input.suggestions.mentions.updateActiveNote();
+		let off = noop;
+		await act(async () => {
+			off = svc.subscribeSelectionChanges(() => void refresh());
+		});
+		const shown = () => h.input.suggestions.mentions.activeNote?.selection;
+		const leafChange = async (on: boolean) => {
+			active = on;
+			const fn = h.events.get("active-leaf-change") as (
+				leaf: unknown,
+			) => void;
+			await act(async () => fn({ view: on ? view : {} }));
+		};
+		// Attaching alone shows nothing; a genuine A selection is the witness.
+		if (mode === "D2a focus on B without a selection") {
+			expect(shown()).toBeUndefined();
+		}
+		await editorA.select(4, 8);
+		expect(shown()?.file).toBe(a.original);
+		if (mode.startsWith("D2a")) {
+			await leafChange(false);
+			// B arrives in a new editor that already has a range; no B transaction yet.
+			view.file = a.other;
+			const editorB = trackEditor(view, a.data.get(a.other)!, 4, 8);
+			await leafChange(true);
+			if (mode.includes("control")) await editorB.select(4, 8);
+			await leafChange(false);
+			await act(async () => refresh());
+			await act(async () => h.input.onSendMessage("about this passage"));
+			off();
+			if (mode.includes("control")) {
+				expect(shown()?.file).toBe(a.other);
+				expect(m.confirm).not.toHaveBeenCalled();
+				expect(h.prompt).toHaveBeenCalledTimes(1);
+			} else {
+				expect(shown()?.file).not.toBe(a.other);
+				expect(h.prompt).not.toHaveBeenCalled();
+			}
+			return;
+		}
+		if (mode.startsWith("D2b")) {
+			view.file = a.other;
+			if (mode.includes("control")) {
+				await act(async () =>
+					editorA.cm.dispatch({
+						changes: {
+							from: 0,
+							to: editorA.cm.state.doc.length,
+							insert: a.data.get(a.other),
+						},
+					}),
+				);
+			}
+			await editorA.select(4, 8);
+			off();
+			if (mode.includes("control")) {
+				expect(shown()?.file).toBe(a.other);
+				expect(shown()?.text).toBe("BODY");
+			} else {
+				expect(shown()?.file).not.toBe(a.other);
+				// Explicit capture refuses too while the document belongs to A.
+				expect(await svc.captureActiveSelection()).toBeNull();
+			}
+			return;
+		}
+		view.file = a.other;
+		editorA.reset(a.data.get(a.other)!);
+		await act(async () =>
+			(h.events.get("file-open") as (file: TFile) => void)(a.other),
+		);
+		// Reattachment retires A's witness and mints nothing.
+		expect(shown()).toBeUndefined();
+		await editorA.select(4, 8);
+		off();
+		expect(shown()?.file).toBe(a.other);
+		expect(shown()?.text).toBe("BODY");
 	},
 );
