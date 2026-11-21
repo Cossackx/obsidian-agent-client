@@ -53,7 +53,11 @@ import {
 	type ComposerChip,
 } from "../services/companion-presentation";
 import { putItem, refreshItem } from "../services/companion-state";
-import { decideSendReview } from "../services/send-review-policy";
+import {
+	decideSendReview,
+	representedItems,
+	type RepresentedSource,
+} from "../services/send-review-policy";
 import { extractMentionedNotes } from "../utils/mention-parser";
 import { prepareContext } from "../services/context-builder";
 import {
@@ -742,6 +746,46 @@ export const ChatPanel = React.memo(function ChatPanel({
 				maxSelectionLength:
 					plugin.settings.displaySettings.maxSelectionLength,
 			});
+			const represented = representedItems(snapshot.items);
+			const selection = suggestions.mentions.activeNote?.selection;
+			if (
+				following &&
+				followActivePath &&
+				selection?.range &&
+				selection.text !== undefined
+			) {
+				represented.push({
+					path: followActivePath,
+					provenance: "following",
+					text: selection.text,
+					scope: { kind: "passage", range: selection.range },
+					positions: selection,
+				});
+			}
+			const mentionPaths = new Set(
+				extractMentionedNotes(content, vaultService).flatMap(
+					({ file }) =>
+						file && !prepared.excludedPaths.includes(file.path)
+							? [file.path]
+							: [],
+				),
+			);
+			if (!turn)
+				await Promise.all(
+					[...mentionPaths].map(async (path) => {
+						try {
+							const entry: RepresentedSource = {
+								path,
+								text: await vaultService.readNote(path),
+								scope: { kind: "note" },
+								provenance: "mention",
+							};
+							represented.push(entry);
+						} catch {
+							/* No exact capture; any outbound bytes require review. */
+						}
+					}),
+				);
 			if (!ownsComposer()) return false;
 			return await handleSendMessage(
 				turn?.intent ?? content,
@@ -752,23 +796,12 @@ export const ChatPanel = React.memo(function ChatPanel({
 						? `${turn?.text} Wrap that exact result in this JSON object: {"requestId":${JSON.stringify(requestId)},"result":<the requested value>}. Echo the requestId verbatim and emit only that JSON object.`
 						: turn?.text,
 					structuredRequestId: requestId,
-					approvePayload: async (blocks, sources) => {
+					canDispatch: ownsComposer,
+					approvePayload: async (blocks, sources, notices) => {
 						const decision = decideSendReview({
 							sources,
-							represented: [
-								...items
-									.filter(
-										(item) => item.role !== "destination",
-									)
-									.map((item) => item.source.path),
-								...(following && followActivePath
-									? [followActivePath]
-									: []),
-								...extractMentionedNotes(content, vaultService)
-									.map((note) => note.file?.path)
-									.filter((path): path is string => !!path),
-							],
-							notices: prepared.notices,
+							represented,
+							notices: [...prepared.notices, ...notices],
 							generated: !!turn,
 							requested,
 						});

@@ -109,6 +109,7 @@ export interface PreparePromptResult {
 	/** Content to send to agent (processed text + images) */
 	agentContent: PromptContent[];
 	sources: PreparedContext["sources"];
+	notices?: readonly string[];
 
 	/** Auto-mention context metadata (if auto-mention is active) */
 	autoMentionContext?: {
@@ -284,6 +285,7 @@ function recordSelection(
 		sources.push({
 			path,
 			text: sent.text,
+			provenance: "following",
 			originalLength: sent.originalLength,
 			capturedAt: Date.now(),
 			scope: { kind: "passage", range },
@@ -469,11 +471,21 @@ export async function preparePrompt(
 	mentionService: IMentionService,
 ): Promise<PreparePromptResult> {
 	const excluded = new Set(input.preparedContext?.excludedPaths);
+	const paths = new Set<string>();
 	const mentionedNotes =
 		input.generatedInstruction !== undefined
 			? []
 			: extractMentionedNotes(input.message, mentionService).filter(
-					({ file }) => !file || !excluded.has(file.path),
+					({ file }) => {
+						if (
+							!file ||
+							excluded.has(file.path) ||
+							paths.has(file.path)
+						)
+							return false;
+						paths.add(file.path);
+						return true;
+					},
 				);
 	// Keep the user's words, but do not implicitly re-attach a captured or destination-only note.
 	const base =
@@ -483,7 +495,9 @@ export async function preparePrompt(
 					message: input.generatedInstruction,
 					activeNote: null,
 				}
-			: input.activeNote && excluded.has(input.activeNote.path)
+			: input.activeNote &&
+				  (excluded.has(input.activeNote.path) ||
+						!isNotePath(input.activeNote.path))
 				? { ...input, activeNote: null }
 				: input;
 	const prepared = await (base.supportsEmbeddedContext
@@ -520,7 +534,7 @@ async function preparePromptWithEmbeddedContext(
 
 	// Build Resource blocks for each mentioned note
 	for (const { file } of mentionedNotes) {
-		if (!file) continue;
+		if (!file || !isNotePath(file.path)) continue;
 
 		const note = await processNote(
 			file,
@@ -534,6 +548,7 @@ async function preparePromptWithEmbeddedContext(
 			sources.push({
 				path: file.path,
 				text: note.content,
+				provenance: "mention",
 				capturedAt: Date.now(),
 				scope: { kind: "note" },
 				originalLength: note.originalLength,
@@ -616,6 +631,9 @@ async function preparePromptWithEmbeddedContext(
 		displayContent: buildDisplayContent(input),
 		agentContent,
 		sources,
+		notices: mentionedLinkBlocks.length
+			? ["This turn adds linked-note metadata from mentioned notes."]
+			: [],
 		autoMentionContext: buildAutoMentionContext(
 			input.activeNote,
 			input.isAutoMentionDisabled,
@@ -638,10 +656,11 @@ async function preparePromptWithTextContext(
 	const sources: PreparedContext["sources"] = [];
 	const wikilinkCtx = buildWikilinkContext(input);
 	const contextBlocks: string[] = [];
+	let addedLinkedMetadata = false;
 
 	// Build XML context blocks for each mentioned note
 	for (const { file } of mentionedNotes) {
-		if (!file) continue;
+		if (!file || !isNotePath(file.path)) continue;
 
 		const note = await processNote(
 			file,
@@ -655,6 +674,7 @@ async function preparePromptWithTextContext(
 			sources.push({
 				path: file.path,
 				text: note.content,
+				provenance: "mention",
 				capturedAt: Date.now(),
 				scope: { kind: "note" },
 				originalLength: note.originalLength,
@@ -681,6 +701,7 @@ async function preparePromptWithTextContext(
 				);
 		if (linksBlock) {
 			contextBlocks.push(linksBlock);
+			addedLinkedMetadata = true;
 		}
 	}
 
@@ -730,6 +751,10 @@ async function preparePromptWithTextContext(
 		displayContent: buildDisplayContent(input),
 		agentContent,
 		sources: input.message.startsWith("/") ? [] : sources,
+		notices:
+			addedLinkedMetadata && !input.message.startsWith("/")
+				? ["This turn adds linked-note metadata from mentioned notes."]
+				: [],
 		// Skip the badge on slash-command turns because the text-context
 		// block was also dropped (see buildAgentMessageText). Keeping the
 		// badge state consistent with what was actually sent to the agent

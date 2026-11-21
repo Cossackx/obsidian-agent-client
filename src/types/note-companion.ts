@@ -84,6 +84,8 @@ export interface CompanionState {
 			capturedAt: number;
 			scope: ContextScope;
 			originalLength?: number;
+			provenance?: "captured" | "mention" | "following";
+			itemId?: string;
 			quoteKind?: "template" | "approved-destination";
 			currentPath?: string;
 			positions?: { from: SourcePosition; to: SourcePosition };

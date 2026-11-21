@@ -192,6 +192,8 @@ export function prepareContext(
 		}
 		sources.push({
 			path: item.source.path,
+			provenance: "captured",
+			itemId: item.id,
 			text,
 			capturedAt: item.source.capturedAt,
 			scope: item.scope,

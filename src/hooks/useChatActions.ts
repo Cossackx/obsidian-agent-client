@@ -42,6 +42,7 @@ export interface UseChatActionsReturn {
 			| "preparedContext"
 			| "approvePayload"
 			| "onConfirmed"
+			| "canDispatch"
 			| "generatedInstruction"
 			| "structuredRequestId"
 		>,
@@ -174,6 +175,7 @@ export function useChatActions(
 				import("./useAgentMessages").SendMessageOptions,
 				| "preparedContext"
 				| "approvePayload"
+				| "canDispatch"
 				| "onConfirmed"
 				| "generatedInstruction"
 				| "structuredRequestId"

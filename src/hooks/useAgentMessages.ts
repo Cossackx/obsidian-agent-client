@@ -45,9 +45,11 @@ import {
 export interface SendMessageOptions {
 	preparedContext?: PreparedContext;
 	generatedInstruction?: string;
+	canDispatch?: () => boolean;
 	approvePayload?: (
 		blocks: readonly PromptContent[],
 		sources: PreparedContext["sources"],
+		notices: readonly string[],
 	) => Promise<boolean>;
 	structuredRequestId?: string;
 	onConfirmed?: (
@@ -396,12 +398,14 @@ export function useAgentMessages(
 					!(await options.approvePayload(
 						prepared.agentContent,
 						prepared.sources,
+						prepared.notices ?? [],
 					))
 				)
 					return;
 				if (
 					!agentClient.hasLiveSession(currentSessionId) ||
-					generation !== generationRef.current
+					generation !== generationRef.current ||
+					options.canDispatch?.() === false
 				)
 					return;
 
