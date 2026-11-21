@@ -502,7 +502,6 @@ async function follow(opts: MountOptions = {}) {
 		path: "Brief.md",
 		text: "BODY",
 		range: sel.range,
-		stillTarget: () => true,
 		capturedAt: 1,
 	});
 	return h;
@@ -1314,10 +1313,15 @@ it.each([
 	});
 	if (mode.startsWith("F1")) {
 		// A fresh editor nobody has observed: no field is not a load.
-		const editorB = trackEditor(view, a.data.get(a.original)!, 0, 4);
+		// [4,8) is BODY in both A and B: only whole-document equality can refuse.
+		const editorB = trackEditor(view, a.data.get(a.original)!, 4, 8);
+		const passage = (
+			c: { text: string; range: { start: number; end: number } } | null,
+		) => c?.text.slice(c.range.start, c.range.end);
 		if (mode.includes("control")) {
 			const capture = await svc.captureActiveSelection();
 			off();
+			expect(passage(capture)).toBe("BODY");
 			expect(capture?.file).toBe(a.original);
 			return;
 		}
@@ -1326,6 +1330,7 @@ it.each([
 		off();
 		expect(editorB.cm.state.doc.toString()).toBe("HEADBODY-A");
 		expect(capture?.text).toBe("HEADBODY-A");
+		expect(passage(capture)).toBe("BODY");
 		expect(capture?.file).toBeUndefined();
 		return;
 	}

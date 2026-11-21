@@ -38,7 +38,7 @@ import {
 	type LineRange,
 } from "../utils/wikilink-resolver";
 import { formatLinkedNotesBlock } from "../utils/wikilink-formatter";
-import { extractSelection, truncateText } from "../utils/selection";
+import { truncateText } from "../utils/selection";
 import { isNotePath, type PreparedContext } from "./context-builder";
 
 // ============================================================================
@@ -79,9 +79,6 @@ export interface PreparePromptInput {
 	/** Maximum characters per mentioned note (default: 10000) */
 	maxNoteLength?: number;
 
-	/** Maximum characters for selection (default: 10000) */
-	maxSelectionLength?: number;
-
 	/** Whether this is the first message in the session */
 	isFirstMessage?: boolean;
 
@@ -115,10 +112,6 @@ export interface PreparePromptResult {
 	autoMentionContext?: {
 		noteName: string;
 		notePath: string;
-		selection?: {
-			fromLine: number;
-			toLine: number;
-		};
 	};
 }
 
@@ -168,7 +161,6 @@ export interface SendPromptResult {
 // ============================================================================
 
 const DEFAULT_MAX_NOTE_LENGTH = 10000; // Default maximum characters per note
-const DEFAULT_MAX_SELECTION_LENGTH = 10000; // Default maximum characters for selection
 const LATEX_MATH_INSTRUCTION =
 	"This client uses Obsidian Flavored Markdown. For math, use $...$ for inline and $$...$$ for display (not \\(...\\) or \\[...\\]).";
 const WIKI_LINK_INSTRUCTION =
@@ -229,41 +221,8 @@ async function processNote(
 }
 
 /**
- * Read selected text from a note and truncate if needed.
- */
-async function readSelection(
-	notePath: string,
-	selection: NonNullable<NoteMetadata["selection"]>,
-	vaultAccess: IVaultAccess,
-	maxSelectionLength: number,
-): Promise<{
-	text: string;
-	wasTruncated: boolean;
-	originalLength: number;
-} | null> {
-	try {
-		const fullText =
-			selection.text ??
-			extractSelection(
-				await vaultAccess.readNote(notePath),
-				selection.from,
-				selection.to,
-			).text;
-		const text = truncateText(fullText, maxSelectionLength);
-		return {
-			text,
-			wasTruncated: text.length < fullText.length,
-			originalLength: fullText.length,
-		};
-	} catch (error) {
-		getLogger().error(`Failed to read selection from ${notePath}:`, error);
-		return null;
-	}
-}
-
-/**
  * Build auto-mention prefix string for session/load recovery.
- * Format: "@[[note name]]:from-to\n" or "@[[note name]]\n"
+ * Format: "@[[note name]]\n" (Follow sends the path only)
  *
  * Returns empty string when the user message starts with "/" to avoid
  * corrupting ACP slash-command recognition at the text-block level.
@@ -274,25 +233,6 @@ async function readSelection(
  * https://agentclientprotocol.com/protocol/slash-commands which allows
  * resource blocks alongside slash-command text blocks.
  */
-function recordSelection(
-	sources: PreparedContext["sources"],
-	path: string,
-	selection: NonNullable<NoteMetadata["selection"]>,
-	sent: { text: string; originalLength: number },
-) {
-	const range = selection.range ?? { start: 0, end: sent.originalLength };
-	if (isNotePath(path))
-		sources.push({
-			path,
-			text: sent.text,
-			provenance: "following",
-			originalLength: sent.originalLength,
-			capturedAt: Date.now(),
-			scope: { kind: "passage", range },
-			positions: { from: selection.from, to: selection.to },
-		});
-}
-
 function buildAutoMentionPrefix(
 	activeNote: NoteMetadata | null | undefined,
 	isDisabled: boolean | undefined,
@@ -300,9 +240,6 @@ function buildAutoMentionPrefix(
 ): string {
 	if (!activeNote || isDisabled) return "";
 	if (message.startsWith("/")) return "";
-	if (activeNote.selection) {
-		return `@[[${activeNote.name}]]:${activeNote.selection.from.line + 1}-${activeNote.selection.to.line + 1}\n`;
-	}
 	return `@[[${activeNote.name}]]\n`;
 }
 
@@ -388,12 +325,6 @@ function buildAutoMentionContext(
 	return {
 		noteName: activeNote.name,
 		notePath: activeNote.path,
-		selection: activeNote.selection
-			? {
-					fromLine: activeNote.selection.from.line + 1,
-					toLine: activeNote.selection.to.line + 1,
-				}
-			: undefined,
 	};
 }
 
@@ -620,15 +551,13 @@ async function preparePromptWithEmbeddedContext(
 	// allows resource blocks alongside slash-command text blocks.
 	const autoMentionBlocks: PromptContent[] = [];
 	if (input.activeNote && !input.isAutoMentionDisabled) {
-		const autoMentionResource = await buildAutoMentionResource(
-			input.activeNote,
-			input.vaultBasePath,
-			vaultAccess,
-			input.convertToWsl ?? false,
-			input.maxSelectionLength ?? DEFAULT_MAX_SELECTION_LENGTH,
-			sources,
+		autoMentionBlocks.push(
+			buildAutoMentionResource(
+				input.activeNote.path,
+				input.vaultBasePath,
+				input.convertToWsl ?? false,
+			),
 		);
-		autoMentionBlocks.push(...autoMentionResource);
 	}
 
 	const autoMentionPrefix = buildAutoMentionPrefix(
@@ -736,16 +665,13 @@ async function preparePromptWithTextContext(
 
 	// Build auto-mention XML context
 	if (input.activeNote && !input.isAutoMentionDisabled) {
-		const autoMentionContextBlocks = await buildAutoMentionTextContext(
-			input.activeNote.path,
-			input.vaultBasePath,
-			vaultAccess,
-			input.convertToWsl ?? false,
-			input.activeNote.selection,
-			input.maxSelectionLength ?? DEFAULT_MAX_SELECTION_LENGTH,
-			sources,
+		contextBlocks.push(
+			buildAutoMentionTextContext(
+				input.activeNote.path,
+				input.vaultBasePath,
+				input.convertToWsl ?? false,
+			),
 		);
-		contextBlocks.push(...autoMentionContextBlocks);
 	}
 
 	// Build system prompt instructions (first message only)
@@ -799,127 +725,33 @@ async function preparePromptWithTextContext(
 }
 
 /**
- * Build Resource content blocks for auto-mentioned note.
+ * Build the path-only auto-mention block. Follow never sends note or passage
+ * text; passages come only from explicit capture (Ask XO / Add selection).
  */
-async function buildAutoMentionResource(
-	activeNote: NoteMetadata,
+function buildAutoMentionResource(
+	notePath: string,
 	vaultPath: string,
-	vaultAccess: IVaultAccess,
 	convertToWsl: boolean,
-	maxSelectionLength: number,
-	sources: PreparedContext["sources"],
-): Promise<PromptContent[]> {
-	const absolutePath = resolveAbsolutePath(
-		activeNote.path,
-		vaultPath,
-		convertToWsl,
+): PromptContent {
+	const uri = buildFileUri(
+		resolveAbsolutePath(notePath, vaultPath, convertToWsl),
 	);
-	const uri = buildFileUri(absolutePath);
-
-	if (activeNote.selection) {
-		const fromLine = activeNote.selection.from.line + 1;
-		const toLine = activeNote.selection.to.line + 1;
-
-		const sel = await readSelection(
-			activeNote.path,
-			activeNote.selection,
-			vaultAccess,
-			maxSelectionLength,
-		);
-		if (!sel) {
-			return [
-				{
-					type: "text",
-					text: `The user has selected lines ${fromLine}-${toLine} in ${uri}. If relevant, use the Read tool to examine the specific lines.`,
-				},
-			];
-		}
-
-		recordSelection(sources, activeNote.path, activeNote.selection, sel);
-		const text = sel.wasTruncated
-			? sel.text +
-				`\n\n[Note: Truncated from ${sel.originalLength} to ${sel.text.length} UTF-16 units]`
-			: sel.text;
-
-		const blocks: PromptContent[] = [
-			{
-				type: "resource",
-				resource: { uri, mimeType: "text/markdown", text },
-				annotations: {
-					audience: ["assistant"],
-					priority: 0.8,
-					lastModified: new Date(activeNote.modified).toISOString(),
-				},
-			},
-			{
-				type: "text",
-				text: `The user has selected lines ${fromLine}-${toLine} in the above note. This is what they are currently focusing on.`,
-			},
-		];
-
-		// The cache exposes no revision binding to a captured editor buffer.
-		// Do not infer metadata outside the exact bytes approved for this selection.
-
-		return blocks;
-	}
-
-	return [
-		{
-			type: "text",
-			text: `The user has opened the note ${uri} in Obsidian. This may or may not be related to the current conversation. If it seems relevant, consider using the Read tool to examine its content.`,
-		},
-	];
+	return {
+		type: "text",
+		text: `The user has opened the note ${uri} in Obsidian. This may or may not be related to the current conversation. If it seems relevant, consider using the Read tool to examine its content.`,
+	};
 }
 
 /**
- * Build XML text context from auto-mentioned note (fallback format).
+ * Build the path-only auto-mention XML context (fallback format).
  */
-async function buildAutoMentionTextContext(
+function buildAutoMentionTextContext(
 	notePath: string,
 	vaultPath: string,
-	vaultAccess: IVaultAccess,
 	convertToWsl: boolean,
-	selection: NoteMetadata["selection"],
-	maxSelectionLength: number,
-	sources: PreparedContext["sources"],
-): Promise<string[]> {
+): string {
 	const absolutePath = resolveAbsolutePath(notePath, vaultPath, convertToWsl);
-
-	if (selection) {
-		const fromLine = selection.from.line + 1;
-		const toLine = selection.to.line + 1;
-
-		const sel = await readSelection(
-			notePath,
-			selection,
-			vaultAccess,
-			maxSelectionLength,
-		);
-		if (!sel) {
-			return [
-				`<obsidian_opened_note selection="lines ${fromLine}-${toLine}">The user opened the note ${absolutePath} in Obsidian and is focusing on lines ${fromLine}-${toLine}. This may or may not be related to the current conversation. If it seems relevant, consider using the Read tool to examine the specific lines.</obsidian_opened_note>`,
-			];
-		}
-
-		recordSelection(sources, notePath, selection, sel);
-		const truncationNote = sel.wasTruncated
-			? `\n\n[Note: The selection was truncated. Original length: ${sel.originalLength} UTF-16 units, showing first ${sel.text.length}]`
-			: "";
-
-		const openedNote = `<obsidian_opened_note selection="lines ${fromLine}-${toLine}">
-The user opened the note ${absolutePath} in Obsidian and selected the following text (lines ${fromLine}-${toLine}):
-
-${sel.text}${truncationNote}
-
-This is what the user is currently focusing on.
-</obsidian_opened_note>`;
-
-		return [openedNote];
-	}
-
-	return [
-		`<obsidian_opened_note>The user opened the note ${absolutePath} in Obsidian. This may or may not be related to the current conversation. If it seems relevant, consider using the Read tool to examine the content.</obsidian_opened_note>`,
-	];
+	return `<obsidian_opened_note>The user opened the note ${absolutePath} in Obsidian. This may or may not be related to the current conversation. If it seems relevant, consider using the Read tool to examine the content.</obsidian_opened_note>`;
 }
 
 // ============================================================================

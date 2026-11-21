@@ -22,7 +22,7 @@ it("never treats an approval as a rejection, even with a misleading label", () =
 });
 
 it.each([false, true])(
-	"does not infer cached links from an editor selection (%s)",
+	"ignores a legacy active-note selection and infers no cached links (%s)",
 	async (supportsEmbeddedContext) => {
 		const getNoteWikiLinks = vi.fn(() => [
 			{ linkText: "Outside", resolvedPath: "Private/Outside.md" },
@@ -43,14 +43,15 @@ it.each([false, true])(
 						to: { line: 0, ch: 6 },
 						text: "TARGET",
 					},
-				},
+				} as never,
 				expandWikilinkContext: true,
 				wikilinkResolver: { getNoteWikiLinks },
 			},
 			{} as never,
 			{} as never,
 		);
-		expect(JSON.stringify(prepared.agentContent)).toContain("TARGET");
+		expect(JSON.stringify(prepared.agentContent)).not.toContain("TARGET");
+		expect(prepared.sources).toEqual([]);
 		expect(JSON.stringify(prepared.agentContent)).not.toContain("Outside");
 		expect(getNoteWikiLinks).not.toHaveBeenCalled();
 	},

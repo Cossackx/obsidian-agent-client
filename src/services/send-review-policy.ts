@@ -51,7 +51,6 @@ export function representedItems(
 
 function identity(source: RepresentedSource): string {
 	const scope = source.scope;
-	const pos = source.provenance === "following" && source.positions;
 	return JSON.stringify([
 		source.path,
 		source.provenance,
@@ -62,7 +61,6 @@ function identity(source: RepresentedSource): string {
 		scope.kind,
 		scope.kind === "note" ? null : [scope.range.start, scope.range.end],
 		scope.kind === "heading" ? [scope.heading, scope.occurrence] : null,
-		pos ? [pos.from.line, pos.from.ch, pos.to.line, pos.to.ch] : null,
 	]);
 }
 

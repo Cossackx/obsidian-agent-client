@@ -403,8 +403,6 @@ export function useAgentMessages(
 							session.promptCapabilities?.embeddedContext ??
 							false,
 						maxNoteLength: settings.displaySettings.maxNoteLength,
-						maxSelectionLength:
-							settings.displaySettings.maxSelectionLength,
 						isFirstMessage: options.isFirstMessage,
 						promptInjection: settings.promptInjection.enabled
 							? {

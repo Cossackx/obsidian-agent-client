@@ -26,11 +26,7 @@ You can temporarily disable auto-mention for a single message by clicking the **
 
 ### Selection Context
 
-If you select text in your note, the selected lines are passed as context to the agent. The badge will show the line range (e.g., `@My Note:5-10`), and the agent receives both the file path and the selected content.
-
-<p align="center">
-  <img src="/images/selection-context.gif" alt="Selection context feature" />
-</p>
+Selecting text in your note does not send it. Follow sends the note path; to include a passage, use **Ask XO about selection** or **Add selection**. Each captures the exact passage when you use it, up to **Max selection length**.
 
 ## Manual Mentions
 
@@ -72,7 +68,7 @@ To prevent excessively large messages, the plugin limits the amount of content i
 | Setting | Default | Description |
 |---------|---------|-------------|
 | **Max note length** | 10,000 characters | Maximum characters per mentioned note |
-| **Max selection length** | 10,000 characters | Maximum characters for selections and Companion excerpts |
+| **Max selection length** | 10,000 characters | Maximum characters for captured passages and Companion excerpts |
 
 Configure these in **Settings → Agent Client → Mentions**.
 
@@ -84,4 +80,4 @@ Content exceeding the limit is truncated with a note indicating the original len
 
 - Use manual mentions to include specific notes as context
 - Mention multiple notes to give the agent a broader understanding
-- For large notes, consider selecting the relevant portion and using auto-mention instead
+- For large notes, select the relevant portion and use **Ask XO about selection** or **Add selection**

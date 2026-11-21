@@ -62,17 +62,6 @@ export const CONTEXT_ONLY_NOTICE =
 // ============================================================================
 
 /**
- * Position in the editor (line and character).
- * Line numbers are 0-indexed.
- */
-export interface EditorPosition {
-	/** Line number (0-indexed) */
-	line: number;
-	/** Character position within the line */
-	ch: number;
-}
-
-/**
  * Metadata for a note in the vault.
  *
  * Contains essential information about a note file without
@@ -96,16 +85,6 @@ export interface NoteMetadata {
 
 	/** Optional aliases from frontmatter */
 	aliases?: string[];
-
-	/** Optional text selection range in the editor */
-	selection?: {
-		from: EditorPosition;
-		to: EditorPosition;
-		text?: string;
-		/** Non-enumerable live editor file; never persisted. */
-		file?: TFile;
-		range?: TextRange;
-	};
 }
 
 /**
@@ -169,11 +148,13 @@ function normalizeFrontmatterAliases(value: unknown): string[] {
 }
 
 /**
- * Unified vault service for note access, fuzzy search, and selection tracking.
+ * Unified vault service for note access, fuzzy search, and explicit
+ * selection capture.
  *
  * Implements IVaultAccess port by wrapping Obsidian's Vault API,
- * providing built-in fuzzy search (formerly NoteMentionService),
- * and tracking editor selection state.
+ * providing built-in fuzzy search (formerly NoteMentionService).
+ * Selections are never tracked passively; they are read only when the
+ * user explicitly captures one (Ask XO about selection / Add selection).
  */
 export class VaultService implements IVaultAccess, IWikilinkResolver {
 	private files: TFile[] = [];
@@ -340,7 +321,6 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 	async captureActiveSelection(allowCaret = false): Promise<
 		| (SourceSnapshot & {
 				range: TextRange;
-				stillTarget?: () => boolean;
 				/** Live editor file; strip before persisting. */
 				file?: TFile;
 		  })
@@ -390,13 +370,6 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 						text,
 						range,
 						capturedAt: Date.now(),
-						...(allowCaret && {
-							stillTarget: () =>
-								file.path === path &&
-								this.plugin.app.vault.getAbstractFileByPath(
-									path,
-								) === file,
-						}),
 					})
 				: null;
 		}
@@ -485,7 +458,7 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 		}
 		this.vaultEventRefs = [];
 
-		// Clean up selection tracking
+		// Clean up active-note listeners
 		this.teardownSelectionTracking();
 	}
 

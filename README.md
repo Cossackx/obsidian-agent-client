@@ -46,7 +46,7 @@ Built on the [Agent Client Protocol (ACP)](https://github.com/agentclientprotoco
 
 ## Features
 
-- **Note Mentions**: Reference notes with `@` — fuzzy search over names, paths, and aliases. The active note is auto-mentioned, down to the exact lines you selected
+- **Note Mentions**: Reference notes with `@` — fuzzy search over names, paths, and aliases. The active note is auto-mentioned by path; to include a passage, use **Ask XO about selection** or **Add selection**
 - **Obsidian-Ready Answers**: Agents are instructed to reply with `[[wikilinks]]`, `$LaTeX$`, and clean Markdown tables (configurable)
 - **Wikilink Context**: `[[links]]` inside mentioned notes are surfaced as paths so the agent can decide which ones to read
 - **MCP & Skills**: Agents use the MCP servers and skills they already have — nothing to configure in the plugin

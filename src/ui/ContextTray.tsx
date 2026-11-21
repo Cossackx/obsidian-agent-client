@@ -368,7 +368,7 @@ export function ContextTray({
 		let item: ContextItem;
 		if (scope === "passage") {
 			const capture = await vaultService.captureActiveSelection();
-			if (!capture || capture.stillTarget?.() === false)
+			if (!capture)
 				throw new Error(
 					"Select a passage in an open source editor first.",
 				);

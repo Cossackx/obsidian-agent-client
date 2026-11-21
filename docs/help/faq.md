@@ -42,7 +42,7 @@ When enabled (**Settings → Agent Client → Mentions → Auto-mention active n
 
 ### Can I include just part of a note?
 
-Yes. Ordinary auto-mention can include a selection as well as the path. Use **Add selection** to stage an exact passage rather than relying on the current editor state, then review the full outbound preview. Other inputs can also be present; the selection does not limit filesystem access.
+Yes, but selecting text alone sends nothing. Follow sends the note path; to include a passage, use **Ask XO about selection** or **Add selection**. The passage is limited by **Max selection length**; review the full outbound preview before sending. Other inputs can also be present; the selection does not limit filesystem access.
 
 ### Does the agent see the notes my note links to?
 

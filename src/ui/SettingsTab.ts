@@ -217,7 +217,7 @@ export class AgentClientSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("Max selection length")
 			.setDesc(
-				"Maximum characters for text selection in auto-mention. Selections longer than this will be truncated.",
+				"Maximum characters for a passage you capture with a selection command. Longer passages are truncated. Following a note sends only its path.",
 			)
 			.addText((text) =>
 				text
