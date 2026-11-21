@@ -114,6 +114,18 @@ export function useNoteCompanion(
 														id,
 														`item:${item.id}:remove`,
 													]),
+												) &&
+												// A newer capture of the same path and scope supersedes this one.
+												!old.items.some(
+													(row) =>
+														row.source.path ===
+															item.source.path &&
+														JSON.stringify(
+															row.scope,
+														) ===
+															JSON.stringify(
+																item.scope,
+															),
 												),
 										),
 									],

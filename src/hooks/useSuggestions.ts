@@ -177,6 +177,18 @@ export function useSuggestions(
 			if (!mentionContext) {
 				return input;
 			}
+			// The lookup is bound to its range; text replaced since then is not edited.
+			const live = detectMention(input, mentionContext.end);
+			if (
+				!live ||
+				live.start !== mentionContext.start ||
+				live.query !== mentionContext.query
+			) {
+				lookup.current++;
+				setMentionSuggestions([]);
+				setMentionContext(null);
+				return input;
+			}
 
 			const { newText } = replaceMention(
 				input,

@@ -89,7 +89,7 @@ export function useHistoryModal(
 		async (sessionId: string, cwd: string) => {
 			try {
 				logger.log(`[ChatPanel] Forking session: ${sessionId}`);
-				agent.clearMessages();
+				// forkSession clears the transcript only after the fork succeeds.
 				await sessionHistory.forkSession(sessionId, cwd);
 				onAgentCwdChange?.(
 					Platform.isWin ? convertWslPathToWindows(cwd) : cwd,
@@ -100,12 +100,7 @@ export function useHistoryModal(
 				logger.error("Session fork error:", error);
 			}
 		},
-		[
-			logger,
-			agent.clearMessages,
-			sessionHistory.forkSession,
-			onAgentCwdChange,
-		],
+		[logger, sessionHistory.forkSession, onAgentCwdChange],
 	);
 
 	const handleDeleteSession = useCallback(

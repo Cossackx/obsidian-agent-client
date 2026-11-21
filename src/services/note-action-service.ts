@@ -8,6 +8,8 @@ class OwnerCancelled extends Conflict {}
 /** Shared per vault so two conversations cannot race the same path. */
 export class NoteActionService {
 	private queues = new Map<string, Promise<void>>();
+	/** Ephemeral: operation id -> the TFile actually written. Never journaled. */
+	private written = new Map<string, TFile>();
 	constructor(
 		private vault: Pick<
 			Vault,
@@ -35,11 +37,13 @@ export class NoteActionService {
 		sessionId: string,
 		proposal: NoteEditProposal,
 		status: WriteReceipt["status"],
+		identity: Pick<WriteReceipt, "targetLost" | "ctime"> = {},
 	): Promise<WriteReceipt> {
-		const receipt = {
+		const receipt: WriteReceipt = {
 			operationId: proposal.id,
 			path: proposal.path,
 			status,
+			...identity,
 		};
 		await this.storage.update(sessionId, (state) => ({
 			...state,
@@ -52,23 +56,39 @@ export class NoteActionService {
 		}));
 		return receipt;
 	}
-	private async read(path: string): Promise<string | null> {
-		const file = this.vault.getAbstractFileByPath(path);
-		if (file === null) return null;
-		if (!(file instanceof TFile) || file.path !== path)
-			throw new Conflict("Destination identity changed");
-		return this.vault.read(file);
+	/** The file at the receipt path, only if it is provably the one written. */
+	private boundFile(receipt: WriteReceipt): TFile | null {
+		if (receipt.targetLost) return null;
+		const file = this.vault.getAbstractFileByPath(receipt.path);
+		if (!(file instanceof TFile) || file.path !== receipt.path) return null;
+		const known = this.written.get(receipt.operationId);
+		if (known) return known === file ? file : null;
+		// Restored receipt (service rebuilt): durable creation time is the only identity left.
+		return receipt.ctime === undefined || file.stat?.ctime === receipt.ctime
+			? file
+			: null;
+	}
+	private identity(file: TFile, path: string) {
+		return file.path === path &&
+			this.vault.getAbstractFileByPath(path) === file
+			? { ctime: file.stat?.ctime }
+			: { targetLost: true as const };
 	}
 	private async replace(
 		path: string,
 		before: string,
 		after: string,
 		owns: () => boolean,
+		expected?: TFile,
 	): Promise<TFile> {
 		if (!owns())
 			throw new OwnerCancelled("The originating conversation changed");
 		const file = this.vault.getAbstractFileByPath(path);
-		if (!(file instanceof TFile) || file.path !== path)
+		if (
+			!(file instanceof TFile) ||
+			file.path !== path ||
+			(expected && file !== expected)
+		)
 			throw new Conflict("Destination is missing or changed");
 		if (typeof this.vault.process !== "function")
 			throw new Conflict("Atomic note editing is unavailable");
@@ -82,6 +102,7 @@ export class NoteActionService {
 			if (
 				file.path !== path ||
 				this.vault.getAbstractFileByPath(path) !== file ||
+				(expected && file !== expected) ||
 				current !== before
 			)
 				throw new Conflict("The destination changed after preview");
@@ -126,6 +147,7 @@ export class NoteActionService {
 				throw new Conflict("The originating conversation changed");
 			await this.record(sessionId, frozen, "pending");
 			let status: WriteReceipt["status"];
+			let identity: Pick<WriteReceipt, "targetLost" | "ctime"> = {};
 			try {
 				if (!owns())
 					throw new Conflict("The originating conversation changed");
@@ -141,13 +163,15 @@ export class NoteActionService {
 						frozen.after,
 						owns,
 					);
+				this.written.set(frozen.id, file);
 				status = (await this.verified(file, frozen.path, frozen.after))
 					? "verified"
 					: "unknown";
+				identity = this.identity(file, frozen.path);
 			} catch (error) {
 				status = error instanceof Conflict ? "conflict" : "unknown";
 			}
-			return this.record(sessionId, frozen, status);
+			return this.record(sessionId, frozen, status, identity);
 		});
 	}
 	async reconcile(sessionId: string, id: string): Promise<WriteReceipt> {
@@ -165,17 +189,25 @@ export class NoteActionService {
 				!["pending", "unknown", "undo-pending"].includes(receipt.status)
 			)
 				return receipt;
-			const text = await this.read(proposal.path);
+			const file = this.boundFile(receipt);
+			const text = file && (await this.vault.read(file));
+			// A replaced or unprovable target stays a conflict; never adopt it by bytes.
+			const keep = file
+				? this.identity(file, proposal.path)
+				: { targetLost: true as const };
 			return this.record(
 				sessionId,
 				proposal,
-				text === proposal.after
-					? "verified"
-					: text === proposal.before
-						? receipt.status === "undo-pending"
-							? "undone"
-							: "not-applied"
-						: "conflict",
+				keep.targetLost
+					? "conflict"
+					: text === proposal.after
+						? "verified"
+						: text === proposal.before
+							? receipt.status === "undo-pending"
+								? "undone"
+								: "not-applied"
+							: "conflict",
+				{ ...keep, ctime: receipt.ctime ?? keep.ctime },
 			);
 		});
 	}
@@ -198,9 +230,16 @@ export class NoteActionService {
 			// No atomic compare-and-delete API. Never trash a note on a stale read.
 			if (proposal.before === null)
 				throw new Error("Created notes must be removed manually");
+			// Bind before the journal write so a swap during it cannot redirect Undo.
+			const target = this.boundFile(receipt);
+			if (!target)
+				throw new Error(
+					"This note was moved or replaced since the edit; Undo it manually.",
+				);
 			await this.storage.assertNoUnresolvedWrite(proposal.path);
 			if (!owns()) return receipt;
-			await this.record(sessionId, proposal, "undo-pending");
+			const identity = { ctime: receipt.ctime };
+			await this.record(sessionId, proposal, "undo-pending", identity);
 			let status: WriteReceipt["status"];
 			try {
 				const file = await this.replace(
@@ -208,6 +247,7 @@ export class NoteActionService {
 					proposal.after,
 					proposal.before,
 					owns,
+					target,
 				);
 				status = (await this.verified(
 					file,
@@ -224,7 +264,7 @@ export class NoteActionService {
 							? "conflict"
 							: "undo-pending";
 			}
-			return this.record(sessionId, proposal, status);
+			return this.record(sessionId, proposal, status, identity);
 		});
 	}
 }

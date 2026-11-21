@@ -105,6 +105,8 @@ export interface UseSessionHistoryOptions {
 	) => Promise<T>;
 	/** Clear the previous transcript only when a restore has succeeded. */
 	onClearMessages?: () => void;
+	/** Gate an in-place transition (fork); throws while a send or change is in flight. */
+	prepareTransition?: () => Promise<() => void>;
 }
 
 /**
@@ -291,6 +293,7 @@ export function useSessionHistory(
 		onClearMessages,
 		withRestoreOwner,
 		getCurrentTranscript,
+		prepareTransition,
 	} = options;
 
 	// Derive capability flags from session.agentCapabilities
@@ -619,8 +622,10 @@ export function useSessionHistory(
 		async (sessionId: string, cwd: string) => {
 			setLoading(true);
 			setError(null);
+			let finish: (() => void) | undefined;
 
 			try {
+				finish = await prepareTransition?.();
 				// Fetch inherited history before changing the display owner.
 				const localMessages =
 					await settingsAccess.loadSessionMessages(sessionId);
@@ -679,11 +684,14 @@ export function useSessionHistory(
 				setError(`Failed to fork session: ${errorMessage}`);
 				throw err; // Re-throw to allow caller to handle
 			} finally {
+				finish?.();
 				setLoading(false);
 			}
 		},
 		[
 			agentClient,
+			prepareTransition,
+			onClearMessages,
 			onSessionLoad,
 			settingsAccess,
 			onMessagesRestore,

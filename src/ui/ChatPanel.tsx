@@ -60,7 +60,7 @@ import {
 	composerChips,
 	type ComposerChip,
 } from "../services/companion-presentation";
-import { putItem, refreshItem } from "../services/companion-state";
+import { putItem, refreshItem, removeItem } from "../services/companion-state";
 import { noteDropPaths, stageDroppedNotes } from "../services/stage-note-drop";
 import {
 	CompanionMutationGate,
@@ -513,6 +513,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 		onIgnoreUpdates: agent.setIgnoreUpdates,
 		withRestoreOwner,
 		onClearMessages: agent.clearMessages,
+		prepareTransition: prepareRestore,
 	});
 	const historyOwner = useRef<SavedSessionInfo | null>(null);
 	const knownRoute = useRef<{
@@ -527,6 +528,13 @@ export const ChatPanel = React.memo(function ChatPanel({
 			cwd: agentCwd,
 		};
 	const [previewing, setPreviewing] = useState(false);
+	const closeMentions = suggestions.mentions.close;
+	const closeCommands = suggestions.commands.close;
+	// Pending or open lookups belong to the outgoing owner's draft.
+	useEffect(() => {
+		closeMentions();
+		closeCommands();
+	}, [session.sessionId, closeMentions, closeCommands]);
 	useEffect(() => {
 		if (session.sessionId && variant === "sidebar")
 			void plugin.app.workspace.requestSaveLayout();
@@ -698,6 +706,12 @@ export const ChatPanel = React.memo(function ChatPanel({
 				{ rows, current: ownsComposer },
 			]);
 	};
+	const selectionBindings = useRef(
+		new Map<
+			string,
+			(() => Promise<string>) & { stillTarget?: () => boolean }
+		>(),
+	);
 	const reviewNext = useRef(false);
 	const actions = useChatActions(
 		plugin,
@@ -786,6 +800,8 @@ export const ChatPanel = React.memo(function ChatPanel({
 			new Notice("Wait for the companion state to load before sending.");
 			return false;
 		}
+		// Bind to this transcript before the first await; a replaced one retires the draft.
+		const transcriptVersion = agent.takeTranscriptSnapshot().version;
 		preparingCompanion.current = true;
 		setPreviewing(true);
 		const requested = reviewNext.current;
@@ -796,9 +812,18 @@ export const ChatPanel = React.memo(function ChatPanel({
 			);
 			const current = saved ?? snapshot;
 			if (!ownsComposer()) return false;
+			// Durable dismissal wins over a stale rendered follow (e.g. failed verify read).
+			const followOn =
+				following &&
+				!current.followDismissed &&
+				!current.items.some(
+					(item) => item.source.path === followActivePath,
+				);
 			const edit = selectionRevisionTarget(snapshot, saved);
 			let editPreimage: string | undefined;
-			let readEditPreimage: (() => Promise<string>) | undefined;
+			let readEditPreimage:
+				| ((() => Promise<string>) & { stillTarget?: () => boolean })
+				| undefined;
 			if (edit) {
 				if (turn || !userSubmitted)
 					throw new Error(
@@ -807,6 +832,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 				readEditPreimage = plugin.bindSelectionPreimage(
 					edit.source.path,
 				);
+				const bound = readEditPreimage;
 				editPreimage = await readEditPreimage();
 				if (!ownsComposer()) return false;
 				const revision = prepareSelectionRevision(
@@ -823,10 +849,12 @@ export const ChatPanel = React.memo(function ChatPanel({
 						edit,
 						...current.items.filter((item) => item.id !== edit.id),
 					],
-					onReply: (result, assistantId) =>
-						recordReplyProposals([
-							revision.reply(result, assistantId),
-						]),
+					onReply: (result, assistantId) => {
+						const reply = revision.reply(result, assistantId);
+						// Ephemeral: Accept must re-prove the originally read note, never just its path.
+						selectionBindings.current.set(reply.proposal.id, bound);
+						recordReplyProposals([reply]);
+					},
 				};
 			}
 			const requestId = turn?.onReply ? crypto.randomUUID() : undefined;
@@ -879,7 +907,8 @@ export const ChatPanel = React.memo(function ChatPanel({
 			const represented = representedItems(snapshot.items);
 			const captureNotices: string[] = [];
 			const selection = suggestions.mentions.activeNote?.selection;
-			if (!turn && following && followActivePath && selection) {
+			let followFresh: () => boolean = () => true;
+			if (!turn && followOn && followActivePath && selection) {
 				let valid = false;
 				try {
 					// Check that the note still exists, and use the actual editor
@@ -887,6 +916,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 					await vaultService.readNote(followActivePath);
 					const live =
 						await vaultService.captureActiveSelection(true);
+					if (live?.stillTarget) followFresh = live.stillTarget;
 					valid =
 						!!live &&
 						live.stillTarget?.() !== false &&
@@ -943,6 +973,8 @@ export const ChatPanel = React.memo(function ChatPanel({
 				attachments,
 				{
 					preparedContext: prepared,
+					transcriptVersion,
+					isAutoMentionDisabled: !followOn,
 					generatedInstruction: requestId
 						? `${turn?.text} Wrap that exact result in this JSON object: {"requestId":${JSON.stringify(requestId)},"result":<the requested value>}. Echo the requestId verbatim and emit only that JSON object.`
 						: turn?.text,
@@ -952,6 +984,11 @@ export const ChatPanel = React.memo(function ChatPanel({
 						dispatched.current = true;
 					},
 					approvePayload: async (blocks, sources, notices) => {
+						// Re-check the followed selection at the actual dispatch decision.
+						if (followActivePath && !followFresh())
+							captureNotices.push(
+								`${followActivePath}: the selected note changed or was removed; review the frozen excerpt.`,
+							);
 						const decision = decideSendReview({
 							sources,
 							represented,
@@ -2216,13 +2253,19 @@ export const ChatPanel = React.memo(function ChatPanel({
 					)
 				}
 				onAccept={(proposal) =>
-					act(() =>
-						plugin.noteActions.apply(
+					act(async () => {
+						const bound = selectionBindings.current.get(
+							proposal.id,
+						);
+						// Throws (no write) if the originally read note moved or was replaced.
+						if (bound) await bound();
+						const target = bound?.stillTarget;
+						return plugin.noteActions.apply(
 							state.sessionId,
 							proposal,
-							current,
-						),
-					)
+							target ? () => current() && target() : current,
+						);
+					})
 				}
 				onCancel={(id) => {
 					if (current() && !mutations.busy)
@@ -2549,6 +2592,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 					guardedUpdate={guardedUpdate}
 					onProposals={recordReplyProposals}
 					onClose={() => setToolsOpen(false)}
+					followPath={followActivePath}
 					messages={messages}
 					canSend={isSessionReady && !reconnecting}
 					busy={
@@ -2575,22 +2619,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 			return;
 		}
 		await guardedUpdate(
-			(old) => ({
-				...old,
-				followDismissed:
-					old.followDismissed ||
-					(old.items.some(
-						(item) =>
-							item.id === chip.itemId &&
-							item.source.path === followActivePath,
-					) &&
-						!old.items.some(
-							(item) =>
-								item.id !== chip.itemId &&
-								item.source.path === followActivePath,
-						)),
-				items: old.items.filter((row) => row.id !== chip.itemId),
-			}),
+			(old) => removeItem(old, chip.itemId, followActivePath),
 			`item:${chip.itemId}:remove`,
 		);
 	};

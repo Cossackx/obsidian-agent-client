@@ -56,15 +56,18 @@ export async function insertReply(input: {
 	const text = await read(target.path);
 	if (!current()) return;
 	checkTarget();
+	// The guard stays here; only a plain, journalable anchor reaches the planner.
+	const anchor = { ...target };
+	delete anchor.stillTarget;
 	const proposal = planLiteralEdit(
 		{ path: target.path, text, capturedAt: Date.now() },
-		target.kind === "caret"
+		anchor.kind === "caret"
 			? {
 					kind: "range",
-					path: target.path,
-					range: mapStoredRange(target.text, text, target.range),
+					path: anchor.path,
+					range: mapStoredRange(anchor.text, text, anchor.range),
 				}
-			: target,
+			: anchor,
 		literal,
 		target.kind === "caret" ? "insert" : "append",
 		id,

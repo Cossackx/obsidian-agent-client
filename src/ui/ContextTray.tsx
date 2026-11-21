@@ -11,7 +11,12 @@ import type {
 } from "../types/note-companion";
 import type { useNoteCompanion } from "../hooks/useNoteCompanion";
 import type { ChatMessage } from "../types/chat";
-import { moveItem, putItem, refreshItem } from "../services/companion-state";
+import {
+	moveItem,
+	putItem,
+	refreshItem,
+	removeItem,
+} from "../services/companion-state";
 import {
 	contextText,
 	headingRanges,
@@ -114,6 +119,7 @@ export function ContextTray({
 	send,
 	onProposals,
 	onClose,
+	followPath,
 }: {
 	companion: ReturnType<typeof useNoteCompanion>;
 	ownsComposer: () => boolean;
@@ -132,6 +138,7 @@ export function ContextTray({
 	send: (turn: StructuredTurn) => Promise<boolean>;
 	onProposals: (rows: ReplyProposal[]) => void;
 	onClose: () => void;
+	followPath?: string;
 }) {
 	const { plugin, vaultService } = useChatContext();
 	const { app } = plugin;
@@ -829,13 +836,12 @@ export function ContextTray({
 									onClick={() =>
 										run(() =>
 											update(
-												(old) => ({
-													...old,
-													items: old.items.filter(
-														(row) =>
-															row.id !== item.id,
+												(old) =>
+													removeItem(
+														old,
+														item.id,
+														followPath,
 													),
-												}),
 												`remove:${item.id}`,
 											),
 										)

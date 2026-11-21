@@ -9,6 +9,7 @@ import {
 	consumeSubmittedItems,
 	emptyCompanion,
 	moveItem,
+	removeItem,
 } from "../src/services/companion-state";
 import { CompanionStorage } from "../src/services/companion-storage";
 import { guardCompanionChange } from "../src/services/companion-mutation";
@@ -520,4 +521,66 @@ it("makes no note mutation if the pending journal tears", async () => {
 	});
 	await expect(service.apply("a", proposal())).rejects.toThrow("Short write");
 	expect(vault.process).not.toHaveBeenCalled();
+});
+
+it("binds Undo to the written file, not its path or bytes, across service rebuilds", async () => {
+	const fx = actionsFixture();
+	const note = fx.vault.getAbstractFileByPath() as TFile & { stat?: unknown };
+	note.stat = { ctime: 7, mtime: 0, size: 1 };
+	const plan = proposal();
+	expect((await fx.service.apply("s", plan)).status).toBe("verified");
+	// Same path, identical bytes, different file: Undo must not touch it.
+	const other = Object.assign(new TFile(path, "Fixture"), {
+		stat: { ctime: 8, mtime: 0, size: 1 },
+	});
+	fx.vault.getAbstractFileByPath.mockReturnValue(other);
+	await expect(fx.service.undo("s", plan.id)).rejects.toThrow(
+		/moved or replaced/,
+	);
+	await expect(fx.restart().undo("s", plan.id)).rejects.toThrow(
+		/moved or replaced/,
+	);
+	expect(fx.text()).toBe(plan.after);
+	// The original file back in place keeps ordinary Undo working, also after a rebuild.
+	fx.vault.getAbstractFileByPath.mockReturnValue(note);
+	expect((await fx.restart().undo("s", plan.id)).status).toBe("undone");
+	expect(fx.text()).toBe(before);
+});
+
+it("rejects a write when the offered target is replaced before the atomic write", async () => {
+	const fx = actionsFixture();
+	let offered = true;
+	const receipt = await fx.service.apply("s", proposal(), () => offered);
+	expect(receipt.status).toBe("verified");
+	const second = planLiteralEdit(
+		{ path, text: fx.text(), capturedAt: 0 },
+		{ path, kind: "end" },
+		"Later",
+		"append",
+		"reply-2",
+	);
+	fx.vault.process.mockImplementationOnce(async (_n, change) => {
+		offered = false;
+		return change(fx.text());
+	});
+	expect(
+		(await fx.service.apply("s", second, () => offered)).status,
+	).not.toBe("verified");
+	expect(fx.text()).toBe(proposal().after);
+});
+
+it("removing the last followed item durably dismisses the follow; distinct items survive", () => {
+	const state = {
+		...emptyCompanion("s"),
+		items: [
+			item("A.md", "a", "1"),
+			item("A.md", "b", "2"),
+			item("B.md", "c", "3"),
+		],
+	};
+	const once = removeItem(state, "1", "A.md");
+	expect(once.followDismissed).toBeFalsy();
+	expect(once.items.map((row) => row.id)).toEqual(["2", "3"]);
+	expect(removeItem(once, "2", "A.md").followDismissed).toBe(true);
+	expect(removeItem(state, "3", "A.md").followDismissed).toBeFalsy();
 });

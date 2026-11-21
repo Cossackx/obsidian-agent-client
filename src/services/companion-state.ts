@@ -36,6 +36,25 @@ export function consumeSubmittedItems(
 	};
 }
 
+/** Remove one item; removing the last item for the followed note also dismisses the follow. */
+export function removeItem(
+	state: CompanionState,
+	itemId: string | undefined,
+	followPath: string | undefined,
+): CompanionState {
+	const removed = state.items.find((item) => item.id === itemId);
+	const items = state.items.filter((item) => item.id !== itemId);
+	return {
+		...state,
+		followDismissed:
+			state.followDismissed ||
+			(!!removed &&
+				removed.source.path === followPath &&
+				!items.some((item) => item.source.path === followPath)),
+		items,
+	};
+}
+
 export function putItem(
 	state: CompanionState,
 	item: ContextItem,

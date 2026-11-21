@@ -66,6 +66,10 @@ export interface WriteReceipt {
 		| "unknown"
 		| "undo-pending"
 		| "undone";
+	/** Durable: the written file was replaced; never verify or undo by path again. */
+	targetLost?: true;
+	/** Durable identity of the written file (TFile.stat.ctime) for restored receipts. */
+	ctime?: number;
 }
 export interface CompanionState {
 	version: 1;

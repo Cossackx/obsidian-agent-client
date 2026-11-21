@@ -387,7 +387,7 @@ export default class AgentClientPlugin extends Plugin {
 			);
 		const exists = () =>
 			file.path === path && vault.getAbstractFileByPath(path) === file;
-		return async () => {
+		const read = async () => {
 			if (!exists())
 				throw new Error(
 					"The selected note moved. Select the passage again.",
@@ -399,6 +399,7 @@ export default class AgentClientPlugin extends Plugin {
 				);
 			return saved;
 		};
+		return Object.assign(read, { stillTarget: exists });
 	}
 
 	async onload() {

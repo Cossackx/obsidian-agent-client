@@ -52,6 +52,8 @@ export interface SendMessageOptions {
 		notices: readonly string[],
 	) => Promise<boolean>;
 	structuredRequestId?: string;
+	/** Transcript generation captured by the caller before its first await. */
+	transcriptVersion?: number;
 	onDispatch?: () => void;
 	onConfirmed?: (
 		reply: string,
@@ -364,7 +366,8 @@ export function useAgentMessages(
 			// before starting a new one to avoid interleaved state updates.
 			const currentSessionId = session.sessionId;
 			const owner = ownerEpoch.current;
-			const version = transcript.current.version;
+			const version =
+				options.transcriptVersion ?? transcript.current.version;
 			const ownsTranscript = () =>
 				mounted.current &&
 				ownerEpoch.current === owner &&

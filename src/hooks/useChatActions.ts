@@ -46,6 +46,8 @@ export interface UseChatActionsReturn {
 			| "onDispatch"
 			| "generatedInstruction"
 			| "structuredRequestId"
+			| "transcriptVersion"
+			| "isAutoMentionDisabled"
 		>,
 	) => Promise<boolean>;
 	handleStopGeneration: () => Promise<void>;
@@ -182,6 +184,8 @@ export function useChatActions(
 				| "onConfirmed"
 				| "generatedInstruction"
 				| "structuredRequestId"
+				| "transcriptVersion"
+				| "isAutoMentionDisabled"
 			>,
 		) => {
 			// Dismiss overlays on send
@@ -231,6 +235,7 @@ export function useChatActions(
 				activeNote: suggestions.mentions.activeNote,
 				vaultBasePath: vaultPath,
 				isAutoMentionDisabled:
+					companion?.isAutoMentionDisabled ||
 					suggestions.mentions.isAutoMentionDisabled,
 				images: images.length > 0 ? images : undefined,
 				resourceLinks:
