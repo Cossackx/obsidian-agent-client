@@ -1189,3 +1189,156 @@ it.each(["initial read error", "independent readback", "clean acknowledgment"])(
 		expect(findBtn(h.output, "Retry local save or load")).toBeUndefined();
 	},
 );
+
+/** Open-leaf and reply-row identity comes from the choice event, not path lookup. */
+async function chooseSectionDestination(h: Mounted) {
+	await clickTray(h, "Choose destination");
+	await clickDialog("Brief.md");
+	await clickDialog("Plan · 1");
+}
+
+it("Z1 a stale open leaf is refused at choice, never rebound to the path occupant", async () => {
+	const before = "# Plan\nBODY\n";
+	const h = await mount({ tools: true, messages: [literalReply] });
+	const a = attachVault(h, fakeFile("Brief.md"), before);
+	openSourceEditor(h, a);
+	await act(async () => h.row.onTools());
+	a.swap(); // leaf still shows the original; the path now resolves to another file
+	await clickTray(h, "Choose destination");
+	await clickDialog("Brief.md");
+	expect(m.dialog?.title).not.toBe("Placement in Brief.md");
+	expect((await h.storage.load("A"))?.destination).toBeUndefined();
+	expect(a.v.process).not.toHaveBeenCalled();
+	expect([...a.data.values()]).toEqual([before, before]);
+});
+
+it.each([
+	"stable",
+	"swap after choice",
+	"reopened tools",
+	"restored destination",
+])(
+	"Z2 reply-row Append uses the destination choice witness: %s",
+	async (mode) => {
+		const before = "# Plan\nBODY\n";
+		const h = await mount({ tools: true, messages: [literalReply] });
+		const a = attachVault(h, fakeFile("Brief.md"), before);
+		openSourceEditor(h, a);
+		await act(async () => h.row.onTools());
+		if (mode === "restored destination")
+			await act(async () =>
+				h.storage.update("A", (s) => ({
+					...s,
+					destination: {
+						kind: "heading",
+						path: "Brief.md",
+						heading: "Plan",
+						occurrence: 1,
+					},
+				})),
+			);
+		else await chooseSectionDestination(h);
+		if (mode === "reopened tools") {
+			await act(async () => h.row.onTools());
+			await act(async () => h.row.onTools());
+		}
+		if (mode === "swap after choice") a.swap();
+		const actions = proposalActions(h)!;
+		expect(actions.insertLabel).toContain("Plan");
+		await act(async () => actions.onInsert());
+		expect(m.picker).not.toHaveBeenCalled();
+		expect(a.data.get(a.other)).toBe(before);
+		if (mode === "stable" || mode === "reopened tools") {
+			expect(a.data.get(a.original)).toContain("Replacement");
+			expect(a.v.process).toHaveBeenCalledExactlyOnceWith(
+				a.original,
+				expect.any(Function),
+			);
+		} else {
+			expect(a.data.get(a.original)).toBe(before);
+			expect(a.v.process).not.toHaveBeenCalled();
+		}
+	},
+);
+
+it("Z3 Pin refuses write authority when the displayed selection's file was replaced", async () => {
+	const original = fakeFile("Brief.md");
+	const h = await mount({
+		tools: true,
+		follow: true,
+		active: {
+			selection: Object.defineProperty({ ...sel }, "file", {
+				value: original,
+			}),
+		},
+	});
+	const a = attachVault(h, original);
+	openSourceEditor(h, a);
+	// An identical replacement is now in the editor; recapture sees it, not the shown file.
+	a.swap();
+	h.plugin.app.workspace.getActiveViewOfType().file = a.other;
+	await act(async () => h.row.onTogglePin(h.row.chips[0]));
+	const items = (await h.storage.load("A"))?.items ?? [];
+	if (items.length) {
+		wireRevision(h, items[0].id);
+		await act(async () => h.row.onTools());
+		await clickTray(h, "Review passages");
+		if (proposalActions(h)?.proposals.length) await acceptOfferedEdit(h);
+	}
+	expect(a.v.process).not.toHaveBeenCalled();
+	expect([...a.data.values()]).toEqual(["BODY", "BODY"]);
+});
+
+it.each(["stable", "refresh after swap"])(
+	"Z4 tracked selection keeps its editor file through metadata refresh: %s",
+	async (mode) => {
+		const h = await mount({ follow: true });
+		const a = attachVault(h);
+		openSourceEditor(h, a);
+		const view = h.plugin.app.workspace.getActiveViewOfType();
+		Object.assign(view.editor, {
+			somethingSelected: () => true,
+			hasFocus: () => false,
+		});
+		Object.assign(a.v, {
+			on: () => ({}),
+			getMarkdownFiles: () => [a.original],
+		});
+		Object.assign(h.plugin.app, {
+			metadataCache: { getFileCache: () => ({}) },
+		});
+		// Real tracker; the fixture plugin is the same shape the harness passes elsewhere.
+		const svc = new VaultService(h.plugin as never);
+		Object.assign(h.vaultAccess, {
+			getActiveNote: () => svc.getActiveNote(),
+			captureActiveSelection: (caret?: boolean) =>
+				svc.captureActiveSelection(caret),
+		});
+		const refresh = () => h.input.suggestions.mentions.updateActiveNote();
+		let off = noop;
+		await act(async () => {
+			off = svc.subscribeSelectionChanges(() => void refresh());
+		});
+		const shown = () => h.input.suggestions.mentions.activeNote?.selection;
+		expect(shown()?.file).toBe(a.original);
+		if (mode !== "stable") {
+			a.swap();
+			view.file = a.other;
+			Object.assign(h.plugin.app.workspace, {
+				getActiveViewOfType: () => null,
+			});
+			// Focus moves to chat: cached selection stays, no selection event on the occupant.
+			const leafChange = h.events.get("active-leaf-change") as (
+				leaf: unknown,
+			) => void;
+			await act(async () => leafChange({ view: {} }));
+			expect(shown()?.file).not.toBe(a.other);
+		}
+		await act(async () => h.input.onSendMessage("about this passage"));
+		off();
+		if (mode === "stable") {
+			expect(m.confirm).not.toHaveBeenCalled();
+			expect(h.prompt).toHaveBeenCalledTimes(1);
+		} else expect(h.prompt).not.toHaveBeenCalled();
+	},
+);
