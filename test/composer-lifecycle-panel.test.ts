@@ -934,6 +934,7 @@ function openSourceEditor(
 	}) as VaultService;
 	h.vaultAccess.captureActiveSelection = (allowCaret) =>
 		service.captureActiveSelection(allowCaret);
+	return view;
 }
 
 async function clickTray(h: Mounted, label: string) {
@@ -1273,10 +1274,10 @@ it("Z3 Pin refuses write authority when the displayed selection's file was repla
 		},
 	});
 	const a = attachVault(h, original);
-	openSourceEditor(h, a);
+	const view = openSourceEditor(h, a);
 	// An identical replacement is now in the editor; recapture sees it, not the shown file.
 	a.swap();
-	h.plugin.app.workspace.getActiveViewOfType().file = a.other;
+	view.file = a.other;
 	await act(async () => h.row.onTogglePin(h.row.chips[0]));
 	const items = (await h.storage.load("A"))?.items ?? [];
 	if (items.length) {
@@ -1294,8 +1295,7 @@ it.each(["stable", "refresh after swap"])(
 	async (mode) => {
 		const h = await mount({ follow: true });
 		const a = attachVault(h);
-		openSourceEditor(h, a);
-		const view = h.plugin.app.workspace.getActiveViewOfType();
+		const view = openSourceEditor(h, a);
 		Object.assign(view.editor, {
 			somethingSelected: () => true,
 			hasFocus: () => false,
