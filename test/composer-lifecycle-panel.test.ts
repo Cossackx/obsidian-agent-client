@@ -588,78 +588,90 @@ it.each(["after-stage", "during-atomic"])(
 		expect([...a.data.values()]).toEqual(["BODY", "BODY"]);
 	},
 );
-it.each(["unchanged", "edit text", "move range"])(
-	"X3 final dispatch uses the actual editor capture: %s",
-	async (mode) => {
-		const enter = latch(),
-			release = latch(),
-			f = fakeFile("Brief.md"),
-			g = fakeFile("Other.md");
-		let buffer = "BODY TAIL",
-			pos = 0;
-		const h = await mount({
-			follow: true,
-			// Fixture input: the displayed selection carries its live file (non-enumerable).
-			active: {
-				selection: Object.defineProperty({ ...sel }, "file", {
-					value: f,
-				}),
-			},
-			files: [f, g],
-			read: async (p) => {
-				if (p === "Other.md") {
-					enter.go();
-					await release.p;
-					return "OTHER";
-				}
-				return buffer;
-			},
-		});
-		const view = Object.assign(new MarkdownView({} as never), {
-			file: f,
-			getMode: () => "source",
-			editor: {
-				listSelections: () => [
-					{
-						anchor: { line: 0, ch: pos },
-						head: { line: 0, ch: pos + 4 },
-					},
-				],
-				getValue: () => buffer,
-			},
-		});
-		Object.assign(h.plugin.app.workspace, {
-			getActiveViewOfType: () => view,
-			getActiveFile: () => f,
-			getLeavesOfType: () => [{ view }],
-		});
-		Object.assign(h.plugin.app.vault, { getAbstractFileByPath: () => f });
-		// Real capture method over the fixture plugin (VaultService only reads this.plugin).
-		const service = Object.create(VaultService.prototype, {
-			plugin: { value: h.plugin },
-		}) as VaultService;
-		const capture = (allowCaret?: boolean) =>
-			service.captureActiveSelection(allowCaret);
-		h.vaultAccess.captureActiveSelection = capture;
-		let send: Promise<unknown> | undefined;
-		await act(async () => {
-			send = h.input.onSendMessage("see @[[Other]]");
-			await enter.p;
-		});
-		if (mode === "edit text") buffer = "SAFE TAIL";
-		if (mode === "move range") pos = 5;
-		const now = (await capture(true))!;
-		release.go();
-		await act(async () => send);
-		const observed = {
-			actual: now.text.slice(now.range.start, now.range.end),
-			oldInWire: JSON.stringify(h.prompt.mock.calls).includes("BODY"),
-			reviews: m.confirm.mock.calls.length,
-		};
-		expect(observed.oldInWire).toBe(mode === "unchanged");
-		if (mode === "unchanged") expect(observed.reviews).toBe(0);
-	},
-);
+it.each([
+	"unchanged",
+	"edit text",
+	"move range",
+	"replace file",
+	"unwitnessed",
+])("X3 final dispatch uses the actual editor capture: %s", async (mode) => {
+	const enter = latch(),
+		release = latch(),
+		f = fakeFile("Brief.md"),
+		g = fakeFile("Other.md");
+	let buffer = "BODY TAIL",
+		pos = 0;
+	const h = await mount({
+		follow: true,
+		// Fixture input: the displayed selection carries its live file (non-enumerable).
+		active: {
+			selection:
+				mode === "unwitnessed"
+					? { ...sel }
+					: Object.defineProperty({ ...sel }, "file", {
+							value: f,
+						}),
+		},
+		files: [f, g],
+		read: async (p) => {
+			if (p === "Other.md") {
+				enter.go();
+				await release.p;
+				return "OTHER";
+			}
+			return buffer;
+		},
+	});
+	const view = Object.assign(new MarkdownView({} as never), {
+		file: f,
+		getMode: () => "source",
+		editor: {
+			listSelections: () => [
+				{
+					anchor: { line: 0, ch: pos },
+					head: { line: 0, ch: pos + 4 },
+				},
+			],
+			getValue: () => buffer,
+		},
+	});
+	Object.assign(h.plugin.app.workspace, {
+		getActiveViewOfType: () => view,
+		getActiveFile: () => view.file,
+		getLeavesOfType: () => [{ view }],
+	});
+	Object.assign(h.plugin.app.vault, {
+		getAbstractFileByPath: () => view.file,
+	});
+	// Real capture method over the fixture plugin (VaultService only reads this.plugin).
+	const service = Object.create(VaultService.prototype, {
+		plugin: { value: h.plugin },
+	}) as VaultService;
+	const capture = (allowCaret?: boolean) =>
+		service.captureActiveSelection(allowCaret);
+	h.vaultAccess.captureActiveSelection = capture;
+	let send: Promise<unknown> | undefined;
+	await act(async () => {
+		send = h.input.onSendMessage("see @[[Other]]");
+		await enter.p;
+	});
+	if (mode === "edit text") buffer = "SAFE TAIL";
+	if (mode === "move range") pos = 5;
+	// Same path and bytes, different file object during the first async read.
+	if (mode === "replace file") view.file = fakeFile("Brief.md");
+	const now = (await capture(true))!;
+	release.go();
+	await act(async () => send);
+	const observed = {
+		actual: now.text.slice(now.range.start, now.range.end),
+		oldInWire: JSON.stringify(h.prompt.mock.calls).includes("BODY"),
+		reviews: m.confirm.mock.calls.length,
+	};
+	expect(observed.oldInWire).toBe(mode === "unchanged");
+	if (mode === "unchanged") expect(observed.reviews).toBe(0);
+	if (mode === "replace file" || mode === "unwitnessed")
+		expect(observed.reviews).toBe(1);
+});
 it("X4 retry does not restage removed newer capture", async () => {
 	let text = "FIRST";
 	const h = await mount({ read: async () => text });
