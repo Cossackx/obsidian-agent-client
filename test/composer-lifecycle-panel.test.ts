@@ -531,6 +531,8 @@ it.each(["stable", "swap"])(
 				sel.range,
 				"ask",
 				noop,
+				// Fixture input (XO-adjudicated): the TFile a real native stage captures.
+				a.original,
 			),
 		);
 		expect(h.prompt).not.toHaveBeenCalled();
@@ -561,6 +563,9 @@ it.each(["after-stage", "during-atomic"])(
 				"suggest-edit",
 				async () => h.native,
 				() => a.v.getAbstractFileByPath("Brief.md") === a.original,
+				undefined,
+				// Fixture input: the view.file stageNativeSelection passes.
+				a.original,
 			),
 		);
 		expect(h.prompt).not.toHaveBeenCalled();
@@ -594,7 +599,12 @@ it.each(["unchanged", "edit text", "move range"])(
 			pos = 0;
 		const h = await mount({
 			follow: true,
-			active: { selection: sel },
+			// Fixture input: the displayed selection carries its live file (non-enumerable).
+			active: {
+				selection: Object.defineProperty({ ...sel }, "file", {
+					value: f,
+				}),
+			},
 			files: [f, g],
 			read: async (p) => {
 				if (p === "Other.md") {

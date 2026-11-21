@@ -556,7 +556,6 @@ export const ChatPanel = React.memo(function ChatPanel({
 	>(() => undefined);
 	stageSelection.current = () => {
 		const id = session.sessionId;
-		const vault = plugin.app.vault;
 		if (!id || companion.state?.sessionId !== id || !canMutate())
 			throw new Error(
 				"The target conversation is not ready to stage context.",
@@ -567,8 +566,8 @@ export const ChatPanel = React.memo(function ChatPanel({
 				runMutation(async () => {
 					check();
 					// Identity at selection time; Send/Accept must prove this same file.
-					const file =
-						selected ?? vault.getAbstractFileByPath?.(source.path);
+					// No path fallback: an unwitnessed passage stays frozen context only.
+					const file: unknown = selected;
 					const itemId = await stageCapturedSelection(
 						source,
 						range,
@@ -946,6 +945,8 @@ export const ChatPanel = React.memo(function ChatPanel({
 			const represented = representedItems(snapshot.items);
 			const captureNotices: string[] = [];
 			const selection = suggestions.mentions.activeNote?.selection;
+			// Identity bound when the selection was displayed, before any await.
+			const shown = selection?.file;
 			let followFresh: () => boolean | Promise<boolean> = () => true;
 			if (!turn && followOn && followActivePath && selection) {
 				let valid = false;
@@ -955,6 +956,11 @@ export const ChatPanel = React.memo(function ChatPanel({
 					>,
 				) =>
 					!!live &&
+					!!shown &&
+					live.file === shown &&
+					shown.path === followActivePath &&
+					plugin.app.vault.getAbstractFileByPath(followActivePath) ===
+						shown &&
 					live.stillTarget?.() !== false &&
 					live.path === followActivePath &&
 					live.range.start === selection.range?.start &&
@@ -2703,15 +2709,19 @@ export const ChatPanel = React.memo(function ChatPanel({
 				throw new Error(
 					"Selection changed. Pin the current selection again.",
 				);
+			const itemId = crypto.randomUUID();
+			// Non-enumerable capture.file never persists; witnesses keep it live.
 			const source = captured ?? {
 				path: chip.path,
 				text: await vaultService.readNote(chip.path),
 				capturedAt: Date.now(),
 			};
+			if (captured?.file)
+				selectionWitnesses.current.set(itemId, captured.file);
 			await guardedUpdate(
 				(old) =>
 					putItem(old, {
-						id: crypto.randomUUID(),
+						id: itemId,
 						source,
 						role: "working",
 						lifetime: "session",

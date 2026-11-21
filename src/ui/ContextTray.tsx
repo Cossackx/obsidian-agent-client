@@ -226,6 +226,25 @@ export function ContextTray({
 		text: await vaultService.readNote(path),
 		capturedAt: Date.now(),
 	});
+	/** Existing-note identity: the offered/captured object is still at its path. */
+	const holds = (file: TFile | undefined, path: string): file is TFile =>
+		file instanceof TFile &&
+		file.path === path &&
+		app.vault.getAbstractFileByPath(path) === file;
+	const replaced = () =>
+		new Error(
+			"The chosen note moved or was replaced. Choose the destination again.",
+		);
+	/** Reads THAT object, never whatever the path now resolves to. */
+	const readHeld = async (
+		file: TFile | undefined,
+		path: string,
+	): Promise<SourceSnapshot> => {
+		if (!holds(file, path)) throw replaced();
+		const text = await app.vault.read(file);
+		if (!holds(file, path)) throw replaced();
+		return { path, text, capturedAt: Date.now() };
+	};
 	const addPaths = async (
 		paths: string[],
 		role: "working" | "reference",
@@ -380,7 +399,7 @@ export function ContextTray({
 				throw new Error(
 					"Place the caret or select text in a source editor first.",
 				);
-			const saved = await read(capture.path);
+			const saved = await readHeld(capture.file, capture.path);
 			const range = mapStoredRange(
 				capture.text,
 				saved.text,
@@ -388,7 +407,7 @@ export function ContextTray({
 			);
 			if (current.current !== sessionId) return;
 			frozenTarget.current = {
-				file: app.vault.getAbstractFileByPath(capture.path),
+				file: capture.file,
 				source: saved,
 				anchor: {
 					kind: "range",
@@ -398,13 +417,25 @@ export function ContextTray({
 			};
 			target = frozenTarget.current.anchor;
 		} else {
+			// Bind the offered objects before the first click can await.
+			const offered = new Map(
+				openNotes().map((path) => [
+					path,
+					app.vault.getAbstractFileByPath(path),
+				]),
+			);
 			const path = await choose(
 				app,
 				"Pick a destination note",
-				openNotes().map((path) => ({ label: path, value: path })),
+				[...offered.keys()].map((path) => ({
+					label: path,
+					value: path,
+				})),
 			);
 			if (!path) return;
-			const source = await read(path);
+			const file = offered.get(path);
+			const held = file instanceof TFile ? file : undefined;
+			const source = await readHeld(held, path);
 			const options: { label: string; value: DestinationAnchor }[] = [
 				{ label: "End of note", value: { kind: "end", path } },
 				...headingRanges(source.text).map(
@@ -421,9 +452,10 @@ export function ContextTray({
 			];
 			const picked = await choose(app, `Placement in ${path}`, options);
 			if (!picked) return;
+			if (!holds(held, path)) throw replaced();
 			target = picked;
 			frozenTarget.current = {
-				file: app.vault.getAbstractFileByPath(path),
+				file: held,
 				source,
 				anchor: picked,
 			};
@@ -436,19 +468,20 @@ export function ContextTray({
 	};
 	const frozenTarget = React.useRef<{
 		/** Identity at destination choice; Accept refuses any substitute. */
-		file: unknown;
+		file: TFile | undefined;
 		source: SourceSnapshot;
 		anchor: DestinationAnchor;
 	} | null>(null);
 	React.useEffect(() => {
 		frozenTarget.current = null;
 	}, [sessionId]);
-	const preview = (proposal: NoteEditProposal) => {
+	const preview = (proposal: NoteEditProposal, file: TFile | undefined) => {
 		if (!sessionId || sessionId !== current.current) return;
 		new NoteActionModal(
 			plugin,
 			sessionId,
 			proposal,
+			file,
 			surfaceAlive,
 			(receipt) => {
 				if (current.current !== sessionId) return;
@@ -478,24 +511,28 @@ export function ContextTray({
 		if (!target || !reply)
 			throw new Error("Choose a reply and a destination first.");
 		const captured = frozenTarget.current;
+		// Existing destinations need the identity captured with them (none after restart).
 		if (
-			target.kind === "range" &&
-			(!captured ||
-				JSON.stringify(captured.anchor) !== JSON.stringify(target))
+			!captured ||
+			JSON.stringify(captured.anchor) !== JSON.stringify(target) ||
+			!holds(captured.file, target.path)
 		)
 			throw new Error(
-				"Capture the destination range again before previewing.",
+				target.kind === "range"
+					? "Capture the destination range again before previewing."
+					: "Choose the destination again; the original note is no longer known.",
 			);
 		preview(
 			planLiteralEdit(
-				target.kind === "range" && captured
+				target.kind === "range"
 					? captured.source
-					: await read(target.path),
+					: await readHeld(captured.file, target.path),
 				target,
 				literal,
 				mode,
 				reply.id,
 			),
+			captured.file,
 		);
 	};
 	const review = async () => {
@@ -585,17 +622,15 @@ export function ContextTray({
 				: chosen &&
 					  JSON.stringify(chosen.anchor) ===
 							JSON.stringify(target) &&
-					  chosen.file instanceof TFile &&
-					  chosen.file.path === target.path &&
-					  app.vault.getAbstractFileByPath(target.path) ===
-							chosen.file
+					  holds(chosen.file, target.path)
 					? chosen.file
 					: null;
 		if (file === null)
 			throw new Error(
 				"Choose the destination heading again; the original note is no longer known.",
 			);
-		const original = intent === "new-note" ? null : await read(target.path);
+		const original =
+			intent === "new-note" ? null : await readHeld(file, target.path);
 		const section =
 			original && target.kind === "heading"
 				? headingRanges(original.text).find(

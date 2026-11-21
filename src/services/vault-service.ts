@@ -71,6 +71,8 @@ export interface NoteMetadata {
 		from: EditorPosition;
 		to: EditorPosition;
 		text?: string;
+		/** Non-enumerable live editor file; never persisted. */
+		file?: TFile;
 		range?: TextRange;
 	};
 }
@@ -317,7 +319,12 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 			this.currentSelection &&
 			this.currentSelection.filePath === activeFile.path
 		) {
-			metadata.selection = this.currentSelection.selection;
+			// Bind the displayed selection to this file object, not its path.
+			metadata.selection = Object.defineProperty(
+				{ ...this.currentSelection.selection },
+				"file",
+				{ value: activeFile },
+			);
 		}
 
 		return Promise.resolve(metadata);

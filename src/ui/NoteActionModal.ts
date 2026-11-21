@@ -1,4 +1,4 @@
-import { Modal } from "obsidian";
+import { Modal, TFile } from "obsidian";
 import { computeDiffLines } from "../utils/diff-lines";
 import type { NoteEditProposal, WriteReceipt } from "../types/note-companion";
 import type AgentClientPlugin from "../plugin";
@@ -10,6 +10,8 @@ export class NoteActionModal extends Modal {
 		private plugin: AgentClientPlugin,
 		private sessionId: string,
 		private proposal: NoteEditProposal,
+		/** The existing note captured with the target; required to edit it. */
+		private expected: TFile | undefined,
 		private current: () => boolean,
 		private onReceipt: (receipt: WriteReceipt) => void,
 		private onUncertain: () => void,
@@ -60,12 +62,18 @@ export class NoteActionModal extends Modal {
 				status.setText("Conversation changed. Open a new preview.");
 				return;
 			}
+			if (proposal.before !== null && !(this.expected instanceof TFile)) {
+				status.setText(
+					"The original note is no longer known. Choose the destination again.",
+				);
+				return;
+			}
 			this.applying = true;
 			apply.disabled = true;
 			cancel.disabled = true;
 			status.setText("Checking the saved preimage and applying…");
 			void this.plugin.noteActions
-				.apply(this.sessionId, proposal, this.current)
+				.apply(this.sessionId, proposal, this.current, this.expected)
 				.then(
 					(receipt) => {
 						this.onReceipt(receipt);

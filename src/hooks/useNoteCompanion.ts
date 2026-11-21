@@ -37,12 +37,33 @@ export function useNoteCompanion(
 	const failed = useRef(
 		new Map<
 			string,
-			{ id: string; kind: string; revision: number; change: Change }
+			{
+				id: string;
+				kind: string;
+				revision: number;
+				change: Change;
+				/** Insertion order fixed at the first attempt. */
+				order: number;
+			}
 		>(),
 	);
 	/** Intent history: last successful full-note add per [session, path]. */
 	const noteAdds = useRef(new Map<string, number>());
+	/** Unacknowledged full-note adds: item id -> [note key, order]. */
+	const unconfirmedNotes = useRef(new Map<string, [string, number]>());
 	const addOrder = useRef(0);
+	// A durable observation of an add's own item ID proves it, acknowledged or not.
+	const observe = (saved: CompanionState | null | undefined) => {
+		for (const item of saved?.items ?? []) {
+			const seen = unconfirmedNotes.current.get(item.id);
+			if (!seen) continue;
+			unconfirmedNotes.current.delete(item.id);
+			noteAdds.current.set(
+				seen[0],
+				Math.max(noteAdds.current.get(seen[0]) ?? 0, seen[1]),
+			);
+		}
+	};
 	const restore = useRef(restoreDraft);
 	restore.current = restoreDraft;
 	const save = useCallback(
@@ -51,6 +72,7 @@ export function useNoteCompanion(
 			change: Change,
 			kind: string,
 			retryRevision?: number,
+			retryOrder?: number,
 		) => {
 			const key = JSON.stringify([id, kind]);
 			const revision =
@@ -63,15 +85,21 @@ export function useNoteCompanion(
 			revisions.current.set(key, revision);
 			// Tray adds are insertion intents, including multi-item batches.
 			const isAdd = kind.startsWith("add:");
-			const attempt = ++addOrder.current;
+			const attempt = retryOrder ?? ++addOrder.current;
 			const noteKey = (item: ContextItem) =>
 				JSON.stringify([id, item.source.path]);
 			let attempted: ContextItem[] = [];
 			let retryChange = change;
 			let readbackUnavailable = false;
 			let intended: CompanionState | undefined;
+			const observed =
+				(transform: Change): Change =>
+				(old) => {
+					observe(old);
+					return transform(old);
+				};
 			const checked = (transform: Change): Change =>
-				Object.assign(transform, { check: change.check });
+				Object.assign(observed(transform), { check: change.check });
 			try {
 				const result = isAdd
 					? await storage.update(
@@ -89,8 +117,21 @@ export function useNoteCompanion(
 												id,
 												`remove:${item.id}`,
 											]),
+										) &&
+										// A later full-note add supersedes this one, even if since removed.
+										!(
+											item.scope.kind === "note" &&
+											(noteAdds.current.get(
+												noteKey(item),
+											) ?? 0) > attempt
 										),
 								);
+								for (const item of attempted)
+									if (item.scope.kind === "note")
+										unconfirmedNotes.current.set(item.id, [
+											noteKey(item),
+											attempt,
+										]);
 								return attempted.length
 									? {
 											...old,
@@ -100,6 +141,7 @@ export function useNoteCompanion(
 							}),
 							(readback) => {
 								readbackUnavailable = readback === undefined;
+								observe(readback);
 								const present = new Set(
 									readback?.items.map((item) => item.id),
 								);
@@ -120,14 +162,6 @@ export function useNoteCompanion(
 														id,
 														`item:${item.id}:remove`,
 													]),
-												) &&
-												// A later successful full-note add supersedes this one, even if since removed.
-												!(
-													item.scope.kind ===
-														"note" &&
-													(noteAdds.current.get(
-														noteKey(item),
-													) ?? 0) > attempt
 												),
 										),
 									],
@@ -163,13 +197,15 @@ export function useNoteCompanion(
 									}
 								},
 							)
-						: await storage.update(id, change);
+						: await storage.update(id, observed(change));
 				if (revisions.current.get(key) === revision)
 					failed.current.delete(key);
 				if (isAdd)
 					for (const item of attempted)
-						if (item.scope.kind === "note")
+						if (item.scope.kind === "note") {
+							unconfirmedNotes.current.delete(item.id);
 							noteAdds.current.set(noteKey(item), attempt);
+						}
 				if (active.current === id) {
 					setState(result);
 					if (
@@ -200,6 +236,7 @@ export function useNoteCompanion(
 						kind,
 						revision,
 						change: retryChange,
+						order: attempt,
 					});
 			}
 		},
@@ -325,7 +362,13 @@ export function useNoteCompanion(
 			);
 			await flush();
 			for (const entry of pending)
-				await save(sessionId, entry.change, entry.kind, entry.revision);
+				await save(
+					sessionId,
+					entry.change,
+					entry.kind,
+					entry.revision,
+					entry.order,
+				);
 			if (!pending.length) bump((n) => n + 1);
 		},
 	};
