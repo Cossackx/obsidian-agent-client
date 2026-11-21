@@ -10,6 +10,7 @@ export async function openNoteSessionPicker(
 	plugin: AgentClientPlugin,
 	path: string,
 	options: {
+		current?: () => boolean;
 		open: (session: SavedSessionInfo, resume: boolean) => Promise<void>;
 		canResume: (session: SavedSessionInfo) => boolean;
 		newChat: (items: ContextItem[]) => Promise<void>;
@@ -20,6 +21,7 @@ export async function openNoteSessionPicker(
 		plugin.settingsService.getSavedSessions(),
 		plugin.companionStorage,
 	);
+	if (options.current?.() === false) return;
 	new (class extends Modal {
 		onOpen() {
 			this.setTitle(`Note conversations · ${path}`);

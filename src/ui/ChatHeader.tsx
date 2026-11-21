@@ -44,6 +44,7 @@ function useSelectorAgents(
  */
 export interface SidebarHeaderProps {
 	variant: "sidebar";
+	onOpenNoteHistory?: () => void;
 	/** Display name of the active agent */
 	agentLabel: string;
 	/** Whether a plugin update is available */
@@ -63,6 +64,7 @@ export interface SidebarHeaderProps {
  */
 export interface FloatingHeaderProps {
 	variant: "floating";
+	onOpenNoteHistory?: () => void;
 	/** Display name of the active agent */
 	agentLabel: string;
 	/** Available agents for switching */
@@ -91,6 +93,7 @@ export interface FloatingHeaderProps {
  */
 export interface EmbeddedHeaderProps {
 	variant: "embedded";
+	onOpenNoteHistory?: () => void;
 	/** Display name of the active agent */
 	agentLabel: string;
 	/** Whether a plugin update is available */
@@ -165,6 +168,7 @@ function SidebarHeader({
 	onExportChat,
 	onShowMenu,
 	onOpenHistory,
+	onOpenNoteHistory,
 }: SidebarHeaderProps) {
 	return (
 		<div className="nav-header agent-client-chat-view-header">
@@ -189,6 +193,7 @@ function SidebarHeader({
 						onClick={onOpenHistory}
 					/>
 				)}
+				<NoteHistoryButton onClick={onOpenNoteHistory} />
 				<NavActionButton
 					icon="save"
 					label="Export chat to Markdown"
@@ -226,6 +231,7 @@ function FloatingHeader({
 	onShowMenu,
 	onMinimize,
 	onClose,
+	onOpenNoteHistory,
 }: FloatingHeaderProps) {
 	// Refs for agent dropdown
 	const agentDropdownRef = useRef<HTMLDivElement>(null);
@@ -324,6 +330,7 @@ function FloatingHeader({
 					tooltip="More"
 					onClick={onShowMenu}
 				/>
+				<NoteHistoryButton onClick={onOpenNoteHistory} />
 				{onMinimize && (
 					<HeaderButton
 						iconName="minimize-2"
@@ -362,6 +369,7 @@ function EmbeddedHeader({
 	isUpdateAvailable,
 	onAgentChange,
 	onShowMenu,
+	onOpenNoteHistory,
 }: EmbeddedHeaderProps) {
 	// Refs for agent dropdown
 	const agentDropdownRef = useRef<HTMLDivElement>(null);
@@ -454,6 +462,7 @@ function EmbeddedHeader({
 					tooltip="More"
 					onClick={onShowMenu}
 				/>
+				<NoteHistoryButton onClick={onOpenNoteHistory} />
 			</div>
 		</div>
 	);
@@ -467,6 +476,16 @@ function EmbeddedHeader({
  * ChatHeader component that dispatches to SidebarHeader, FloatingHeader,
  * or EmbeddedHeader based on the `variant` prop.
  */
+function NoteHistoryButton({ onClick }: { onClick?: () => void }) {
+	return onClick ? (
+		<HeaderButton
+			iconName="file-clock"
+			tooltip="Note history"
+			onClick={onClick}
+		/>
+	) : null;
+}
+
 export function ChatHeader(props: ChatHeaderProps) {
 	if (props.variant === "embedded") {
 		return <EmbeddedHeader {...props} />;

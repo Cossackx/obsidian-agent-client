@@ -1923,6 +1923,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 				onExportChat={() => void handleExportChat()}
 				onShowMenu={handleShowSidebarMenu}
 				onOpenHistory={handleOpenHistory}
+				onOpenNoteHistory={() => showNoteHistory()}
 			/>
 		) : variant === "floating" ? (
 			// Floating variant always shows the agent selector (no agent pinning).
@@ -1935,6 +1936,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 				onAgentChange={(agentId) => void handleSwitchAgent(agentId)}
 				onShowMenu={handleShowFloatingMenu}
 				onMinimize={onMinimize}
+				onOpenNoteHistory={() => showNoteHistory()}
 				onClose={onClose}
 			/>
 		) : (
@@ -1952,6 +1954,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 						: (agentId) => void handleSwitchAgent(agentId)
 				}
 				onShowMenu={handleShowFloatingMenu}
+				onOpenNoteHistory={() => showNoteHistory()}
 			/>
 		);
 
@@ -2182,6 +2185,121 @@ export const ChatPanel = React.memo(function ChatPanel({
 			sessionHistory.loading,
 		error: errorInfo?.title,
 	});
+	const openContinuity = async () => {
+		const path =
+			(await vaultService.getActiveNote())?.path ??
+			companion.state?.destination?.path;
+		if (!ownsComposer()) return;
+		if (!path)
+			throw new Error("Open a Markdown note to find its conversations.");
+		const available = () => canMutate() && !mutations.busy;
+		await openNoteSessionPicker(plugin, path, {
+			current: ownsComposer,
+			canResume: (saved) =>
+				saved.agentId === session.agentId &&
+				saved.cwd === agentCwd &&
+				sessionHistory.canRestore &&
+				acpClient.isInitialized(),
+			newChat: async (selected) => {
+				if (!available())
+					throw new Error(
+						"The originating conversation changed or is busy.",
+					);
+				const finish = await prepareRestore();
+				setReconnecting(true);
+				try {
+					if (!mounted.current) return;
+					await handleNewChatWithPersist(undefined, true, true);
+					const id = acpClient.getConfirmedSessionId();
+					if (
+						!mounted.current ||
+						!id ||
+						id === session.sessionId ||
+						!selected.length
+					)
+						return;
+					await plugin.companionStorage.update(id, (old) => ({
+						...old,
+						items: selected.map((item) => ({
+							...item,
+							id: crypto.randomUUID(),
+						})),
+					}));
+				} finally {
+					finish();
+					setReconnecting(false);
+				}
+			},
+			open: async (saved, resume) => {
+				if (!available())
+					throw new Error(
+						"The originating conversation changed or is busy.",
+					);
+				const compatible =
+					saved.agentId === session.agentId &&
+					saved.cwd === agentCwd &&
+					acpClient.getCurrentAgentId() === saved.agentId;
+				setReconnecting(true);
+				try {
+					if (resume && compatible) {
+						try {
+							await sessionHistory.restoreSession(
+								saved.sessionId,
+								saved.cwd,
+							);
+							if (
+								!mounted.current ||
+								acpClient.hasLiveSession(saved.sessionId)
+							)
+								return;
+						} catch (error) {
+							if (error instanceof ConversationOwnershipError)
+								throw error;
+							if (!mounted.current) return;
+							new Notice(
+								"Resume failed; opening local history without a connection.",
+							);
+						}
+					}
+					await withRestoreOwner(
+						saved.sessionId,
+						async (stillMounted) => {
+							const history =
+								await plugin.settingsService.loadSessionMessages(
+									saved.sessionId,
+								);
+							if (!stillMounted()) return;
+							await acpClient.disconnect();
+							if (!stillMounted()) return;
+							const current = agent.getCurrentTranscript(
+								saved.sessionId,
+							);
+							historyOwner.current = saved;
+							publishedId.current = saved.sessionId;
+							const preferences = agent.updateSessionFromLoad(
+								saved.sessionId,
+							);
+							agent.setMessagesFromLocal(
+								current ?? history ?? [],
+							);
+							await preferences;
+						},
+					);
+				} finally {
+					setReconnecting(false);
+				}
+			},
+		});
+	};
+	const showNoteHistory = () =>
+		void openContinuity().catch(
+			(error: unknown) =>
+				new Notice(
+					error instanceof Error
+						? error.message
+						: "Could not open note history.",
+				),
+		);
 	const companionElement = (
 		<>
 			<div className="xo-note-status" role="status">
@@ -2272,133 +2390,6 @@ export const ChatPanel = React.memo(function ChatPanel({
 					send={(turn) =>
 						sendWithCompanion(turn.text, undefined, turn)
 					}
-					openContinuity={async () => {
-						const path =
-							(await vaultService.getActiveNote())?.path ??
-							companion.state?.destination?.path;
-						if (!path)
-							throw new Error(
-								"Open a Markdown note to find its conversations.",
-							);
-						await openNoteSessionPicker(plugin, path, {
-							canResume: (saved) =>
-								saved.agentId === session.agentId &&
-								saved.cwd === agentCwd &&
-								sessionHistory.canRestore &&
-								acpClient.isInitialized(),
-							newChat: async (selected: ContextItem[]) => {
-								if (
-									!ownsComposer() ||
-									changingOwner.current ||
-									preparingCompanion.current ||
-									mutations.busy ||
-									busySending.current
-								)
-									return;
-								changingOwner.current = true;
-								invalidateComposer();
-								setReconnecting(true);
-								try {
-									await companion.flush();
-									if (!mounted.current) return;
-									await handleNewChatWithPersist(
-										undefined,
-										true,
-										true,
-									);
-									if (!mounted.current) return;
-									const id =
-										acpClient.getConfirmedSessionId();
-									if (!id || id === session.sessionId) return;
-									if (selected.length)
-										await plugin.companionStorage.update(
-											id,
-											(old) => ({
-												...old,
-												items: selected.map((item) => ({
-													...item,
-													id: crypto.randomUUID(),
-												})),
-											}),
-										);
-								} finally {
-									changingOwner.current = false;
-									setReconnecting(false);
-								}
-							},
-							open: async (saved, resume) => {
-								if (
-									!ownsComposer() ||
-									changingOwner.current ||
-									preparingCompanion.current ||
-									isSending
-								)
-									return;
-								const compatible =
-									saved.agentId === session.agentId &&
-									saved.cwd === agentCwd &&
-									acpClient.getCurrentAgentId() ===
-										saved.agentId;
-								setReconnecting(true);
-								try {
-									if (resume && compatible) {
-										try {
-											await sessionHistory.restoreSession(
-												saved.sessionId,
-												saved.cwd,
-											);
-											if (
-												!mounted.current ||
-												acpClient.hasLiveSession(
-													saved.sessionId,
-												)
-											)
-												return;
-										} catch (error) {
-											if (
-												error instanceof
-												ConversationOwnershipError
-											)
-												throw error;
-											if (!mounted.current) return;
-											new Notice(
-												"Resume failed; opening local history without a connection.",
-											);
-										}
-									}
-									await withRestoreOwner(
-										saved.sessionId,
-										async (stillMounted) => {
-											const history =
-												await plugin.settingsService.loadSessionMessages(
-													saved.sessionId,
-												);
-											if (!stillMounted()) return;
-											await acpClient.disconnect();
-											if (!stillMounted()) return;
-											const current =
-												agent.getCurrentTranscript(
-													saved.sessionId,
-												);
-											historyOwner.current = saved;
-											publishedId.current =
-												saved.sessionId;
-											const preferences =
-												agent.updateSessionFromLoad(
-													saved.sessionId,
-												);
-											agent.setMessagesFromLocal(
-												current ?? history ?? [],
-											);
-											await preferences;
-										},
-									);
-								} finally {
-									setReconnecting(false);
-								}
-							},
-						});
-					}}
 				/>
 			)}
 		</>

@@ -112,7 +112,6 @@ export function ContextTray({
 	canSend,
 	busy,
 	send,
-	openContinuity,
 	onProposals,
 	onClose,
 }: {
@@ -131,7 +130,6 @@ export function ContextTray({
 	canSend: boolean;
 	busy: boolean;
 	send: (turn: StructuredTurn) => Promise<boolean>;
-	openContinuity: () => Promise<void>;
 	onProposals: (rows: ReplyProposal[]) => void;
 	onClose: () => void;
 }) {
@@ -671,13 +669,6 @@ export function ContextTray({
 		>
 			<div className="xo-note-row xo-note-tools-head">
 				<strong>Note tools</strong>
-				<button
-					type="button"
-					disabled={working || busy}
-					onClick={() => run(openContinuity, false)}
-				>
-					Note conversations
-				</button>
 				<button
 					type="button"
 					aria-label="Close note tools"
