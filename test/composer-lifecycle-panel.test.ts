@@ -1,25 +1,50 @@
 import { ContextTray } from "../src/ui/ContextTray";
 import { it, expect, vi, beforeEach, afterEach } from "vitest";
-import { createElement, act } from "react";
-import { createRoot } from "react-dom/client";
+import {
+	createElement,
+	act,
+	type MemoExoticComponent,
+	type ReactNode,
+} from "react";
+import { createRoot, type Root } from "react-dom/client";
 import { ChatContextProvider } from "../src/ui/ChatContext";
-import { ChatPanel } from "../src/ui/ChatPanel";
-import { useAgentMessages } from "../src/hooks/useAgentMessages";
+import { ChatPanel, type ChatPanelProps } from "../src/ui/ChatPanel";
+import {
+	useAgentMessages,
+	type UseAgentMessagesReturn,
+} from "../src/hooks/useAgentMessages";
+import type { useAgent } from "../src/hooks/useAgent";
 import { CompanionStorage } from "../src/services/companion-storage";
 import { ChatViewRegistry } from "../src/services/view-registry";
-import { InputArea } from "../src/ui/InputArea";
-import { ChatHeader } from "../src/ui/ChatHeader";
+import { InputArea, type InputAreaProps } from "../src/ui/InputArea";
+import { ChatHeader, type FloatingHeaderProps } from "../src/ui/ChatHeader";
 import { MessageList } from "../src/ui/MessageList";
+import { ComposerContext } from "../src/ui/ComposerContext";
+import { ReplyNoteActions } from "../src/ui/ReplyNoteActions";
 import { TFile, FileSystemAdapter } from "obsidian";
+import type { ChatMessage, PromptContent } from "../src/types/chat";
+import type { SelectionOwner } from "../src/services/editor-selection-action";
+import {
+	fakeFile,
+	find,
+	findBtn,
+	latch,
+	propsOf,
+	search,
+	type MenuRow,
+	type TreeElement,
+} from "./composer-lifecycle-helpers";
 const m = vi.hoisted(() => ({
-	notice: vi.fn(),
-	confirm: vi.fn(),
-	agent: undefined as any,
-	picker: vi.fn(),
-	menu: [] as any[],
+	notice: vi.fn<(message: string) => void>(),
+	confirm: vi.fn<(...args: unknown[]) => Promise<boolean>>(),
+	agent: undefined as
+		| ((...args: Parameters<typeof useAgent>) => unknown)
+		| undefined,
+	picker: vi.fn<(...args: unknown[]) => unknown>(),
+	menu: [] as MenuRow[],
 }));
 vi.mock("obsidian", async (orig) => ({
-	...(await orig<any>()),
+	...(await orig<object>()),
 	Modal: class {},
 	Plugin: class {},
 	PluginSettingTab: class {},
@@ -28,19 +53,19 @@ vi.mock("obsidian", async (orig) => ({
 	MarkdownView: class {},
 	FuzzySuggestModal: class {},
 	FileSystemAdapter: class {
-		getFullPath(p) {
+		getFullPath(p: string) {
 			return "/test/" + p;
 		}
 	},
 	arrayBufferToBase64: () => "AA==",
 	Menu: class {
-		addItem(fn) {
-			let row: any = {
-				setTitle(s) {
+		addItem(fn: (row: MenuRow) => void) {
+			const row: MenuRow = {
+				setTitle(this: MenuRow, s: string) {
 					this.title = s;
 					return this;
 				},
-				onClick(f) {
+				onClick(this: MenuRow, f: () => void) {
 					this.click = f;
 					return this;
 				},
@@ -51,13 +76,13 @@ vi.mock("obsidian", async (orig) => ({
 		showAtMouseEvent() {}
 	},
 	Notice: class {
-		constructor(s) {
+		constructor(s: string) {
 			m.notice(s);
 		}
 	},
 }));
 vi.mock("../src/hooks/useAgent", () => ({
-	useAgent: (...args) => m.agent(...args),
+	useAgent: (...args: Parameters<typeof useAgent>) => m.agent!(...args),
 }));
 vi.mock("../src/hooks/useSessionHistory", () => ({
 	useSessionHistory: () => ({
@@ -70,35 +95,22 @@ vi.mock("../src/hooks/useHistoryModal", () => ({
 	useHistoryModal: () => ({ handleOpenHistory: () => {} }),
 }));
 vi.mock("../src/hooks/useSettings", () => ({
-	useSettingsSelector: (p, sel) => sel(p.settings),
-	useSettings: (p) => p.settings,
+	useSettingsSelector: (
+		p: { settings: unknown },
+		sel: (settings: unknown) => unknown,
+	) => sel(p.settings),
+	useSettings: (p: { settings: unknown }) => p.settings,
 }));
 vi.mock("../src/ui/ContextPreviewModal", () => ({
-	confirmPayload: (...a) => m.confirm(...a),
+	confirmPayload: (...a: unknown[]) => m.confirm(...a),
 }));
 vi.mock("../src/ui/ReplyTargetPicker", () => ({
-	chooseReplyTarget: (...a) => m.picker(...a),
+	chooseReplyTarget: (...a: unknown[]) => m.picker(...a),
 }));
 vi.mock("../src/ui/MessageList", () => ({ MessageList: () => null }));
 const noop = () => {};
 const doc = { nodeType: 9, addEventListener: noop, activeElement: null };
-let root: any;
-function latch() {
-	let go!: () => void;
-	const p = new Promise<void>((r) => (go = r));
-	return { p, go };
-}
-function search(e: any, check: (e: any) => boolean): any {
-	if (Array.isArray(e)) {
-		for (const child of e) {
-			const hit = search(child, check);
-			if (hit) return hit;
-		}
-	} else if (e?.props) {
-		if (check(e)) return e;
-		return search(e.props.children, check);
-	}
-}
+let root: Root | null = null;
 beforeEach(() => {
 	vi.stubGlobal("window", {
 		document: doc,
@@ -114,19 +126,45 @@ beforeEach(() => {
 	m.menu.length = 0;
 });
 afterEach(async () => {
-	if (root) await act(async () => root.unmount());
+	const mounted = root;
+	if (mounted) await act(async () => mounted.unmount());
 	root = null;
 	vi.unstubAllGlobals();
 });
 
-async function mount(opts: any = {}) {
-	const files = new Map();
+type Capture = (allowCaret?: boolean) => Promise<unknown>;
+interface FakeVaultAccess {
+	getActiveNote: () => Promise<Record<string, unknown> | null>;
+	subscribeSelectionChanges: () => () => void;
+	getAllFiles: () => TFile[];
+	readNote: (path: string) => Promise<string | undefined>;
+	searchNotes: ReturnType<typeof vi.fn<(query: string) => Promise<object[]>>>;
+	captureActiveSelection?: Capture;
+}
+interface MountOptions {
+	embedded?: boolean;
+	messages?: ChatMessage[];
+	active?: Record<string, unknown>;
+	follow?: boolean;
+	files?: TFile[];
+	read?: (path: string) => Promise<string>;
+	inject?: boolean;
+	readBinary?: () => unknown;
+	tools?: boolean;
+	receipt?: boolean;
+	input?: boolean;
+	variant?: "sidebar" | "floating";
+}
+type TrayProps = Parameters<typeof ContextTray>[0];
+
+async function mount(opts: MountOptions = {}) {
+	const files = new Map<string, string>();
 	let failed = false,
-		verifyNext = false,
+		verifyNext = 0,
 		failVerify = 0;
 	const adapter = {
-		exists: async (p) => p === "side" || files.has(p),
-		read: async (p) => {
+		exists: async (p: string) => p === "side" || files.has(p),
+		read: async (p: string) => {
 			if (failVerify) {
 				failVerify--;
 				throw Error("transient verification error");
@@ -134,21 +172,21 @@ async function mount(opts: any = {}) {
 			return files.get(p);
 		},
 		mkdir: noop,
-		write: async (p, t) => {
+		write: async (p: string, t: string) => {
 			if (failed) {
 				failed = false;
 				throw Error("test persistence failure");
 			}
 			files.set(p, t);
 			if (verifyNext) {
-				failVerify = Number(verifyNext);
-				verifyNext = false;
+				failVerify = verifyNext;
+				verifyNext = 0;
 			}
 		},
 		list: async () => ({ files: [...files.keys()], folders: [] }),
 	};
 	const storage = new CompanionStorage(adapter as never, "side");
-	const prompt = vi.fn(async () => {}),
+	const prompt = vi.fn(async (_id: string, _blocks: PromptContent[]) => {}),
 		create = vi.fn(),
 		restart = vi.fn(),
 		session = {
@@ -174,12 +212,14 @@ async function mount(opts: any = {}) {
 		extension: "md",
 		...opts.active,
 	};
-	const vaultAccess = {
+	const vaultAccess: FakeVaultAccess = {
 		getActiveNote: async () => (opts.follow ? active : null),
 		subscribeSelectionChanges: () => noop,
 		getAllFiles: () => opts.files ?? [file],
 		readNote: opts.read ?? (async () => "BODY"),
-		searchNotes: vi.fn(async () => [active]),
+		searchNotes: vi.fn(
+			async (_query: string): Promise<object[]> => [active],
+		),
 	};
 	const settings = {
 		displaySettings: {
@@ -203,8 +243,8 @@ async function mount(opts: any = {}) {
 		getSnapshot: () => settings,
 		getSavedSessions: () => [{ sessionId: "A" }],
 	};
-	const events = new Map();
-	let native;
+	const events = new Map<string, unknown>();
+	let native: (() => SelectionOwner | undefined) | undefined;
 	const vault = {
 		adapter: new FileSystemAdapter(),
 		getConfig: () => false,
@@ -215,7 +255,7 @@ async function mount(opts: any = {}) {
 			vault,
 			workspace: {
 				requestSaveLayout: noop,
-				on: (e, fn) => {
+				on: (e: string, fn: unknown) => {
 					events.set(e, fn);
 					return e;
 				},
@@ -228,14 +268,18 @@ async function mount(opts: any = {}) {
 		companionStorage: storage,
 		viewRegistry: new ChatViewRegistry(),
 		getAvailableAgents: () => [],
-		registerCompanionSelection: (_, h) => {
+		registerCompanionSelection: (
+			_: string,
+			h: () => SelectionOwner | undefined,
+		) => {
 			native = h;
 			return noop;
 		},
 		checkForUpdates: async () => false,
 		registerPendingPromptHandler: () => noop,
 	};
-	let enqueue: any, messagesAPI: any;
+	let enqueue: UseAgentMessagesReturn["enqueueUpdate"] | undefined,
+		messagesAPI: UseAgentMessagesReturn | undefined;
 	m.agent = (client, settings, vault) => {
 		const msg = useAgentMessages(
 			client,
@@ -258,39 +302,49 @@ async function mount(opts: any = {}) {
 			forceRestartAgent: restart,
 		};
 	};
-	let tree: any, inputTree: any;
+	let tree: ReactNode, inputTree: ReactNode;
 	const context = {
 		plugin,
 		settingsService,
 		acpClient: wire,
 		vaultService: vaultAccess,
 	};
-	let tray: any;
-	let detail;
-	function DetailHarness({ node }) {
-		detail = node.type(node.props);
+	let tray: ReactNode;
+	let detail: ReactNode;
+	function DetailHarness({ node }: { node: TreeElement }) {
+		// ReceiptDetails is module-private; render its element in place.
+		detail = (node.type as (props: object) => ReactNode)(node.props);
 		return null;
 	}
-	function ToolHarness({ props }) {
+	function ToolHarness({ props }: { props: TrayProps }) {
 		tray = ContextTray(props);
 		const node =
 			opts.receipt &&
-			search(tray, (e) => e.type?.name === "ReceiptDetails");
+			search(
+				tray,
+				(e) =>
+					typeof e.type === "function" &&
+					e.type.name === "ReceiptDetails",
+			);
 		return node ? createElement(DetailHarness, { node }) : null;
 	}
-	function InputHarness({ props }) {
+	function InputHarness({ props }: { props: InputAreaProps }) {
 		inputTree = InputArea(props);
 		return null;
 	}
 	function Harness() {
-		tree = ChatPanel.type({
+		tree = (
+			ChatPanel as MemoExoticComponent<
+				(props: ChatPanelProps) => ReactNode
+			>
+		).type({
 			viewId: "view",
 			variant: opts.variant ?? "sidebar",
 			initialAgentId: "reviewer",
 			workingDirectory: "/test",
 		});
-		const tool = opts.tools && search(tree, (e) => e.type === ContextTray);
-		const inputElement = search(tree, (e) => e.type === InputArea);
+		const tool = opts.tools && find(tree, ContextTray);
+		const inputElement = find(tree, InputArea)!;
 		return [
 			opts.input
 				? createElement(InputHarness, {
@@ -313,10 +367,11 @@ async function mount(opts: any = {}) {
 		namespaceURI: "http://www.w3.org/1999/xhtml",
 		addEventListener: noop,
 	};
-	root = createRoot(container as any);
+	const created = createRoot(container as never);
+	root = created;
 	const render = () =>
 		act(async () =>
-			root.render(
+			created.render(
 				createElement(
 					ChatContextProvider,
 					{ value: context as never },
@@ -327,13 +382,16 @@ async function mount(opts: any = {}) {
 	await render();
 	return {
 		get input() {
-			return search(tree, (e) => e.type === InputArea).props;
+			return propsOf(tree, InputArea);
 		},
 		get header() {
-			return search(tree, (e) => e.type === ChatHeader).props;
+			return propsOf(tree, ChatHeader);
 		},
 		get row() {
-			return this.input.contextRow.props;
+			return propsOf(
+				propsOf(tree, InputArea).contextRow,
+				ComposerContext,
+			);
 		},
 		get output() {
 			return tree;
@@ -348,13 +406,13 @@ async function mount(opts: any = {}) {
 			return inputTree;
 		},
 		get msg() {
-			return messagesAPI;
+			return messagesAPI!;
 		},
 		get native() {
-			return native();
+			return native!()!;
 		},
-		chunk: (t) =>
-			enqueue({ type: "agent_message_chunk", sessionId: "A", text: t }),
+		chunk: (t: string) =>
+			enqueue!({ type: "agent_message_chunk", sessionId: "A", text: t }),
 		failVerify: (count = 1) => (verifyNext = count),
 		session,
 		readFail: () => (failed = true),
@@ -369,14 +427,8 @@ async function mount(opts: any = {}) {
 		render,
 	};
 }
-
-const findBtn = (e, label) =>
-	search(e, (x) => x.type === "button" && x.props.children === label)?.props;
-const fakeFile = (path, size = 10) =>
-	Object.assign(new TFile(path, path.split(".")[0]), {
-		name: path,
-		stat: { mtime: 0, size },
-	});
+type Mounted = Awaited<ReturnType<typeof mount>>;
+const load = async (h: Mounted, id = "A") => (await h.storage.load(id))!;
 
 const sel = {
 	range: { start: 0, end: 4 },
@@ -384,7 +436,7 @@ const sel = {
 	to: { line: 0, ch: 4 },
 	text: "BODY",
 };
-async function follow(opts = {}) {
+async function follow(opts: MountOptions = {}) {
 	const h = await mount({
 		follow: true,
 		active: { selection: sel },
@@ -405,29 +457,35 @@ import { stageEditorSelection } from "../src/services/editor-selection-action";
 import { VaultService } from "../src/services/vault-service";
 import { MarkdownView } from "obsidian";
 import { NoteActionService } from "../src/services/note-action-service";
-function attachVault(h) {
+function attachVault(h: Mounted) {
 	const original = fakeFile("Brief.md"),
 		other = fakeFile("Brief.md"),
-		data = new Map([
+		data = new Map<TFile, string>([
 			[original, "BODY"],
 			[other, "BODY"],
 		]);
 	let present = original;
-	Object.assign(h.plugin.app.vault, {
-		getAbstractFileByPath: (p) => (p === "Brief.md" ? present : null),
-		read: async (f) => data.get(f),
-		process: vi.fn(async (f, fn) => {
-			data.set(f, fn(data.get(f)));
+	const v = Object.assign(h.plugin.app.vault, {
+		getAbstractFileByPath: (p: string) =>
+			p === "Brief.md" ? present : null,
+		read: async (f: TFile) => data.get(f),
+		process: vi.fn(async (f: TFile, fn: (data: string) => string) => {
+			data.set(f, fn(data.get(f)!));
 			return data.get(f);
 		}),
 	});
-	h.plugin.noteActions = new NoteActionService(h.plugin.app.vault, h.storage);
+	const plugin = Object.assign(h.plugin, {
+		noteActions: new NoteActionService(v as never, h.storage),
+	});
 	h.vaultAccess.readNote = async () => data.get(present);
-	h.plugin.app.workspace.getLeavesOfType = () => [];
-	h.plugin.editorsMatchPreimage =
-		AgentClientPlugin.prototype.editorsMatchPreimage;
-	h.plugin.bindSelectionPreimage =
-		AgentClientPlugin.prototype.bindSelectionPreimage;
+	Object.assign(h.plugin.app.workspace, { getLeavesOfType: () => [] });
+	// Copy the real (private) preimage methods onto the fixture plugin.
+	const { editorsMatchPreimage, bindSelectionPreimage } =
+		Object.getOwnPropertyDescriptors(AgentClientPlugin.prototype);
+	Object.defineProperties(h.plugin, {
+		editorsMatchPreimage,
+		bindSelectionPreimage,
+	});
 	return {
 		original,
 		other,
@@ -435,16 +493,16 @@ function attachVault(h) {
 		swap: () => {
 			present = other;
 		},
-		v: h.plugin.app.vault,
+		v,
+		plugin,
 	};
 }
-function wireRevision(h, itemId) {
+function wireRevision(h: Mounted, itemId: string) {
 	m.confirm.mockResolvedValueOnce(true);
 	h.prompt.mockImplementationOnce(async (_, blocks) => {
 		const id = /"requestId":"([a-z0-9-]+)"/.exec(
 			blocks
-				.filter((b) => b.type === "text")
-				.map((b) => b.text)
+				.flatMap((b) => (b.type === "text" ? [b.text] : []))
 				.join(" "),
 		)![1];
 		h.chunk(
@@ -455,10 +513,12 @@ function wireRevision(h, itemId) {
 		);
 	});
 }
-function proposalActions(h) {
-	const list = search(h.output, (e) => e.type === MessageList).props;
+function proposalActions(h: Mounted) {
+	const list = propsOf(h.output, MessageList);
 	const reply = list.messages.find((m) => m.role === "assistant");
-	return reply && list.renderReplyActions(reply)?.props;
+	return (
+		reply && find(list.renderReplyActions!(reply), ReplyNoteActions)?.props
+	);
 }
 it.each(["stable", "swap"])(
 	"X1 Review passages generated diff: %s target at Accept",
@@ -476,20 +536,12 @@ it.each(["stable", "swap"])(
 		expect(h.prompt).not.toHaveBeenCalled();
 		wireRevision(h, h.row.chips[0].itemId);
 		await act(async () => h.row.onTools());
-		await act(async () => findBtn(h.tray, "Review passages").onClick());
-		const actions = proposalActions(h);
+		await act(async () => findBtn(h.tray, "Review passages")!.onClick());
+		const actions = proposalActions(h)!;
 		expect(actions.proposals).toHaveLength(1);
 		expect(a.v.process).not.toHaveBeenCalled();
 		if (mode === "swap") a.swap();
 		await act(async () => actions.onAccept(actions.proposals[0].proposal));
-		const receipt = (await h.storage.load("A")).operations[0]?.receipt;
-		console.log(
-			"X1",
-			mode,
-			receipt,
-			a.data.get(a.original),
-			a.data.get(a.other),
-		);
 		expect(a.data.get(a.other)).toBe("BODY");
 		expect(a.data.get(a.original)).toBe(mode === "swap" ? "BODY" : "EDIT");
 	},
@@ -517,23 +569,17 @@ it.each(["after-stage", "during-atomic"])(
 		await act(async () => h.input.onSendMessage(h.input.inputValue));
 		const actions = proposalActions(h);
 		if (mode === "during-atomic") {
-			expect(actions.proposals).toHaveLength(1);
+			expect(actions!.proposals).toHaveLength(1);
 			a.v.process.mockImplementationOnce(async (f, fn) => {
 				a.swap();
-				a.data.set(f, fn(a.data.get(f)));
+				a.data.set(f, fn(a.data.get(f)!));
+				return undefined;
 			});
 		}
 		if (actions?.proposals.length)
 			await act(async () =>
 				actions.onAccept(actions.proposals[0].proposal),
 			);
-		console.log(
-			"X2",
-			mode,
-			(await h.storage.load("A")).operations.map((o) => o.receipt.status),
-			a.data.get(a.original),
-			a.data.get(a.other),
-		);
 		expect([...a.data.values()]).toEqual(["BODY", "BODY"]);
 	},
 );
@@ -559,7 +605,7 @@ it.each(["unchanged", "edit text", "move range"])(
 				return buffer;
 			},
 		});
-		const view = Object.assign(new MarkdownView(), {
+		const view = Object.assign(new MarkdownView({} as never), {
 			file: f,
 			getMode: () => "source",
 			editor: {
@@ -577,19 +623,22 @@ it.each(["unchanged", "edit text", "move range"])(
 			getActiveFile: () => f,
 			getLeavesOfType: () => [{ view }],
 		});
-		h.plugin.app.vault.getAbstractFileByPath = () => f;
-		const capture = VaultService.prototype.captureActiveSelection.bind({
-			plugin: h.plugin,
-		});
+		Object.assign(h.plugin.app.vault, { getAbstractFileByPath: () => f });
+		// Real capture method over the fixture plugin (VaultService only reads this.plugin).
+		const service = Object.create(VaultService.prototype, {
+			plugin: { value: h.plugin },
+		}) as VaultService;
+		const capture = (allowCaret?: boolean) =>
+			service.captureActiveSelection(allowCaret);
 		h.vaultAccess.captureActiveSelection = capture;
-		let send;
+		let send: Promise<unknown> | undefined;
 		await act(async () => {
 			send = h.input.onSendMessage("see @[[Other]]");
 			await enter.p;
 		});
 		if (mode === "edit text") buffer = "SAFE TAIL";
 		if (mode === "move range") pos = 5;
-		const now = await capture(true);
+		const now = (await capture(true))!;
 		release.go();
 		await act(async () => send);
 		const observed = {
@@ -597,7 +646,6 @@ it.each(["unchanged", "edit text", "move range"])(
 			oldInWire: JSON.stringify(h.prompt.mock.calls).includes("BODY"),
 			reviews: m.confirm.mock.calls.length,
 		};
-		console.log("X3", mode, observed);
 		expect(observed.oldInWire).toBe(mode === "unchanged");
 		if (mode === "unchanged") expect(observed.reviews).toBe(0);
 	},
@@ -609,14 +657,13 @@ it("X4 retry does not restage removed newer capture", async () => {
 	await act(async () => h.input.onStageNotes(["Brief.md"]));
 	text = "SECOND";
 	await act(async () => h.input.onStageNotes(["Brief.md"]));
-	expect((await h.storage.load("A")).items[0].source.text).toBe("SECOND");
+	expect((await load(h)).items[0].source.text).toBe("SECOND");
 	await act(async () => h.row.onRemove(h.row.chips[0]));
-	expect((await h.storage.load("A")).items).toEqual([]);
+	expect((await load(h)).items).toEqual([]);
 	await act(async () =>
-		findBtn(h.output, "Retry local save or load").onClick(),
+		findBtn(h.output, "Retry local save or load")!.onClick(),
 	);
-	const items = (await h.storage.load("A")).items.map((i) => i.source.text);
-	console.log("X4", items);
+	const items = (await load(h)).items.map((i) => i.source.text);
 	expect(items).toEqual([]);
 });
 it("X5 pending @ lookup stays retired across owner switch", async () => {
@@ -629,15 +676,17 @@ it("X5 pending @ lookup stays retired across owner switch", async () => {
 		await release.p;
 		return [{ path: "Old.md", name: "Old" }];
 	});
-	await act(async () => h.row.onAdd({ nativeEvent: {} }));
+	await act(async () => h.row.onAdd({ nativeEvent: {} } as never));
 	await act(async () => {
-		m.menu.find((x) => x.title === "Add note…").click();
+		m.menu.find((x) => x.title === "Add note…")!.click!();
 		await enter.p;
 	});
 	h.restart.mockImplementationOnce(async () => {
 		h.session.sessionId = "B";
 	});
-	await act(async () => h.header.onAgentChange("other"));
+	await act(async () =>
+		(h.header as FloatingHeaderProps).onAgentChange("other"),
+	);
 	await h.render();
 	release.go();
 	await act(async () => {});
@@ -650,7 +699,7 @@ it("X5 pending @ lookup stays retired across owner switch", async () => {
 
 import { planLiteralEdit } from "../src/services/note-edit-planner";
 it("X10 restored Undo directs manual recovery; exact preimage and after-image are inspectable", async () => {
-	const msg = {
+	const msg: ChatMessage = {
 		id: "reply-10",
 		role: "assistant",
 		content: [{ type: "text", text: "Replacement" }],
@@ -667,34 +716,27 @@ it("X10 restored Undo directs manual recovery; exact preimage and after-image ar
 		"replace",
 		msg.id,
 	);
-	await act(async () => h.plugin.noteActions.apply("A", p));
-	h.plugin.noteActions = new NoteActionService(
+	await act(async () => a.plugin.noteActions.apply("A", p));
+	a.plugin.noteActions = new NoteActionService(
 		{ ...a.v } as never,
 		h.storage,
 	);
-	const acts = search(
-		h.output,
-		(e) => e.type === MessageList,
-	).props.renderReplyActions(msg).props;
+	const acts = propsOf(
+		propsOf(h.output, MessageList).renderReplyActions!(msg),
+		ReplyNoteActions,
+	);
 	expect(acts.proposals.length).toBe(0);
 	await act(async () => acts.onUndo(p.id));
 	expect(m.notice.mock.calls.flat().join(" ")).toContain("manual recovery");
 	expect(a.v.process).toHaveBeenCalledTimes(1);
 	await act(async () => h.row.onTools());
+	const details = search(h.detail, (e) => e.type === "details")!.props;
 	await act(async () =>
-		h.detail.props.onToggle({ currentTarget: { open: true } }),
-	);
-	const shown = search(h.detail, (e) => e.type === "pre").props.children;
-	const record = (await h.storage.load("A")).operations[0];
-	console.log(
-		"X10",
-		JSON.stringify({
-			notice: m.notice.mock.calls.at(-1),
-			shown,
-			before: record.proposal.before,
-			after: record.proposal.after,
+		(details.onToggle as (event: unknown) => void)({
+			currentTarget: { open: true },
 		}),
 	);
+	const shown = search(h.detail, (e) => e.type === "pre")!.props.children;
 	expect(shown).toContain("UNCHANGED CONTEXT");
 });
 it.each([2, 3])(
@@ -704,7 +746,7 @@ it.each([2, 3])(
 		await act(async () => h.row.onTogglePin(h.row.chips[0]));
 		await act(async () => h.row.onTools());
 		h.failVerify(failures);
-		await act(async () => findBtn(h.tray, "Remove").onClick());
+		await act(async () => findBtn(h.tray, "Remove")!.onClick());
 		const pending = !!findBtn(h.output, "Retry local save or load");
 		expect(pending).toBe(true);
 		m.confirm.mockResolvedValueOnce(true);
@@ -713,13 +755,7 @@ it.each([2, 3])(
 		expect(
 			JSON.stringify(m.confirm.mock.calls.map((args) => args[1])),
 		).not.toContain("BODY");
-		const s = await h.storage.load("A");
-		console.log("X11", failures, {
-			saved: s.followDismissed,
-			items: s.items.length,
-			wire: h.prompt.mock.calls.length,
-			reviews: m.confirm.mock.calls.length,
-		});
+		const s = await load(h);
 		expect(s.followDismissed).toBe(true);
 		expect(JSON.stringify(h.prompt.mock.calls)).not.toContain("BODY");
 	},
@@ -737,9 +773,9 @@ it.each([false, true])(
 		});
 		await act(async () => h.row.onTools());
 		const add = async () =>
-			act(async () => findBtn(h.tray, "Add selection").onClick());
+			act(async () => findBtn(h.tray, "Add selection")!.onClick());
 		await add();
-		const first = (await h.storage.load("A")).items[0];
+		const first = (await load(h)).items[0];
 		await act(async () =>
 			h.storage.update("A", (s) => ({
 				...s,
@@ -754,14 +790,9 @@ it.each([false, true])(
 		await add();
 		expect(findBtn(h.output, "Retry local save or load")).toBeDefined();
 		await act(async () =>
-			findBtn(h.output, "Retry local save or load").onClick(),
+			findBtn(h.output, "Retry local save or load")!.onClick(),
 		);
-		const rows = (await h.storage.load("A")).items;
-		console.log(
-			"X12",
-			changedRange,
-			rows.map((i) => [i.scope.range, i.annotation]),
-		);
+		const rows = (await load(h)).items;
 		expect(rows[0].id).toBe(first.id);
 		expect(rows).toHaveLength(2);
 	},
@@ -777,8 +808,8 @@ it("X14 positive control: independently added passages can share a range but hav
 	});
 	await act(async () => h.row.onTools());
 	for (let n = 0; n < 2; n++)
-		await act(async () => findBtn(h.tray, "Add selection").onClick());
-	const items = (await h.storage.load("A")).items;
+		await act(async () => findBtn(h.tray, "Add selection")!.onClick());
+	const items = (await load(h)).items;
 	expect(items).toHaveLength(2);
 	expect(items[0].id).not.toBe(items[1].id);
 });

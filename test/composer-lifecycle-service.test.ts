@@ -1,40 +1,8 @@
 import { expect, it, vi } from "vitest";
 import { TFile } from "obsidian";
-import {
-	contextText,
-	headingRanges,
-	prepareContext,
-} from "../src/services/context-builder";
-import {
-	consumeSubmittedItems,
-	emptyCompanion,
-	moveItem,
-} from "../src/services/companion-state";
 import { CompanionStorage } from "../src/services/companion-storage";
 import { NoteActionService } from "../src/services/note-action-service";
-import {
-	describeNoteTarget,
-	planLiteralEdit,
-} from "../src/services/note-edit-planner";
-import {
-	createRevisionProposal,
-	parseStructuredReply,
-	validatePassageRevisions,
-} from "../src/services/passage-review";
-import { validateCaptureProposal } from "../src/services/capture-proposal";
-import { compareSource } from "../src/services/source-comparison";
-import {
-	findNoteSessions,
-	renameNoteAssociation,
-} from "../src/services/note-session-index";
-import { buildSynthesisPrompt } from "../src/services/synthesis-request";
-import { deriveCompanionStatus } from "../src/services/companion-presentation";
-import {
-	preparePrompt,
-	sendPreparedPrompt,
-} from "../src/services/message-sender";
-import type { ContextItem } from "../src/types/note-companion";
-
+import { planLiteralEdit } from "../src/services/note-edit-planner";
 const directory = "fixture-config/plugins/agent-client/sessions";
 function fixture() {
 	const files = new Map<string, string>();
@@ -63,19 +31,6 @@ function fixture() {
 		files,
 	};
 }
-const item = (path: string, text: string, id = path): ContextItem => ({
-	id,
-	role: "reference",
-	lifetime: "turn",
-	scope: { kind: "note" },
-	source: { path, text, capturedAt: 42 },
-});
-const limits = {
-	embeddedContext: true,
-	maxNoteLength: 100,
-	maxSelectionLength: 100,
-};
-
 function actionsFixture() {
 	const { storage, adapter, files } = fixture();
 	const note = new TFile(path, "Fixture");
@@ -110,12 +65,6 @@ function actionsFixture() {
 	};
 }
 
-import { guardCompanionChange } from "../src/services/companion-mutation";
-import {
-	decideSendReview,
-	representedItems,
-} from "../src/services/send-review-policy";
-import { insertReply } from "../src/services/reply-note-action";
 const path = "Fixture.md",
 	before = "A\r\n";
 const proposal = () =>
@@ -126,12 +75,6 @@ const proposal = () =>
 		"append",
 		"reply-A",
 	);
-const base = { notices: [], generated: false, requested: false };
-function latch() {
-	let go!: () => void;
-	const p = new Promise<void>((r) => (go = r));
-	return { go, p };
-}
 
 it.each([true, false])(
 	"X6 Atomic callback accepted, process rejects, unchanged witness: applied=%s",
@@ -156,7 +99,6 @@ it.each([true, false])(
 			writes: a.vault.process.mock.calls.length,
 			actual: a.text(),
 		};
-		console.log("X6", applied, obs);
 		expect(await a.storage.load("B")).toBeNull();
 		expect(obs).toMatchObject({
 			status: applied ? "verified" : "not-applied",
@@ -176,7 +118,7 @@ it.each(["same", "new"])(
 		const s =
 			mode === "same"
 				? a.restart()
-				: new NoteActionService({ ...a.vault } as never, a.storage);
+				: new NoteActionService({ ...a.vault }, a.storage);
 		const r = await s.reconcile("A", p.id);
 		expect(r.status).toBe(mode === "same" ? "verified" : "conflict");
 		expect(a.vault.process).toHaveBeenCalledTimes(1);
