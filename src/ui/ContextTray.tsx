@@ -62,6 +62,15 @@ function ReceiptDetails({ proposal }: { proposal: NoteEditProposal }) {
 			<summary>Change and source</summary>
 			<small>Source reply: {proposal.sourceMessageId}</small>
 			{expanded && (
+				<>
+					{/* JSON string literals keep CRLF, final newline and Unicode escapes exact for manual recovery. */}
+					<small>Exact text before (null: note did not exist)</small>
+					<pre>{JSON.stringify(proposal.before)}</pre>
+					<small>Exact text after</small>
+					<pre>{JSON.stringify(proposal.after)}</pre>
+				</>
+			)}
+			{expanded && (
 				<pre>
 					{computeDiffLines(proposal.before ?? "", proposal.after)
 						.filter((line) => line.type !== "context")

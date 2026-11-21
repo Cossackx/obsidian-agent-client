@@ -83,6 +83,7 @@ export class NoteActionService {
 		after: string,
 		owns: () => boolean,
 		expected?: TFile,
+		accepted?: (file: TFile) => void,
 	): Promise<TFile> {
 		if (!owns())
 			throw new OwnerCancelled("The originating conversation changed");
@@ -109,6 +110,8 @@ export class NoteActionService {
 				current !== before
 			)
 				throw new Conflict("The destination changed after preview");
+			// Witness now: the effect is possible even if acknowledgement fails.
+			accepted?.(file);
 			return after;
 		});
 		return file;
@@ -124,6 +127,8 @@ export class NoteActionService {
 		sessionId: string,
 		proposal: NoteEditProposal,
 		owns = () => true,
+		/** The existing note captured with the proposal; a substitute is refused. */
+		expected?: TFile,
 	): Promise<WriteReceipt> {
 		if (!proposalIsValid(proposal))
 			return Promise.reject(new Error("Invalid note proposal"));
@@ -165,6 +170,8 @@ export class NoteActionService {
 						frozen.before,
 						frozen.after,
 						owns,
+						expected,
+						(target) => this.written.set(frozen.id, target),
 					);
 				this.written.set(frozen.id, file);
 				status = (await this.verified(file, frozen.path, frozen.after))
@@ -237,7 +244,7 @@ export class NoteActionService {
 			const target = this.boundFile(receipt);
 			if (!target)
 				throw new Error(
-					"The original note identity cannot be proved: it may have been moved or replaced, or the plugin restarted. No change was made; inspect the recorded before text for manual recovery.",
+					"The original note identity cannot be proved: it may have been moved or replaced, or the plugin restarted. No change was made; for manual recovery, open Note tools › Write receipts › Change and source to copy the exact before and after text.",
 				);
 			await this.storage.assertNoUnresolvedWrite(proposal.path);
 			if (!owns()) return receipt;
