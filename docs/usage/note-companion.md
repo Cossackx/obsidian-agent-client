@@ -45,7 +45,7 @@ For an excerpt or deliberate range replacement, open **Note tools** → **Place 
 
 For `pending`, `unknown`, or `undo-pending`, use **Reconcile without writing** before retrying. It compares current file content with the recorded before and after text; it can confirm the effect, report it was not applied or was undone, or report a conflict. It does not apply or revert anything. Unresolved operations block further Companion writes to that path. If the receipt itself could not be saved, inspect the note and resolve any storage warning before acting again.
 
-**Undo…** → **Undo this write** is available for a verified edit to an existing note. It restores the recorded before text only if the note still matches the verified after text. Inspect and remove unwanted created notes manually; undo does not delete them. This receipt flow does not cover edits made by agent tools.
+**Undo…** → **Undo this write** is available for a verified edit to an existing note. It restores the recorded before text only if the note still matches the verified after text and the plugin can prove it is the same file that was written. Rebuilding a chat service within the same vault runtime preserves that file binding. After a plugin or app restart, older receipts do not establish file identity: neither a matching path, creation timestamp nor matching content is sufficient. Undo then refuses without changing the note, and reconciliation cannot certify that unbound target. Inspect the recorded before/after text and recover manually rather than forcing an old operation. Inspect and remove unwanted created notes manually; undo does not delete them. This receipt flow does not cover edits made by agent tools.
 
 ## Review annotated passages
 

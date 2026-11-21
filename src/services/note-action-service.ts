@@ -5,11 +5,15 @@ import { CompanionStorage, proposalIsValid } from "./companion-storage";
 class Conflict extends Error {}
 class OwnerCancelled extends Conflict {}
 
+// Preserve actual file witnesses across service rebuilds within one vault runtime.
+// Neither a pathname nor creation time proves identity after that runtime ends.
+const writtenByVault = new WeakMap<object, Map<string, TFile>>();
+
 /** Shared per vault so two conversations cannot race the same path. */
 export class NoteActionService {
 	private queues = new Map<string, Promise<void>>();
 	/** Ephemeral: operation id -> the TFile actually written. Never journaled. */
-	private written = new Map<string, TFile>();
+	private written: Map<string, TFile>;
 	constructor(
 		private vault: Pick<
 			Vault,
@@ -18,7 +22,10 @@ export class NoteActionService {
 		private storage: CompanionStorage,
 		private canWrite: (path: string, preimage: string) => boolean = () =>
 			true,
-	) {}
+	) {
+		this.written = writtenByVault.get(vault) ?? new Map<string, TFile>();
+		writtenByVault.set(vault, this.written);
+	}
 
 	private enqueue<T>(path: string, work: () => Promise<T>): Promise<T> {
 		path = path.normalize("NFC").toLowerCase();
@@ -62,11 +69,7 @@ export class NoteActionService {
 		const file = this.vault.getAbstractFileByPath(receipt.path);
 		if (!(file instanceof TFile) || file.path !== receipt.path) return null;
 		const known = this.written.get(receipt.operationId);
-		if (known) return known === file ? file : null;
-		// Restored receipt (service rebuilt): durable creation time is the only identity left.
-		return receipt.ctime === undefined || file.stat?.ctime === receipt.ctime
-			? file
-			: null;
+		return known === file ? file : null;
 	}
 	private identity(file: TFile, path: string) {
 		return file.path === path &&
@@ -234,7 +237,7 @@ export class NoteActionService {
 			const target = this.boundFile(receipt);
 			if (!target)
 				throw new Error(
-					"This note was moved or replaced since the edit; Undo it manually.",
+					"The original note identity cannot be proved: it may have been moved or replaced, or the plugin restarted. No change was made; inspect the recorded before text for manual recovery.",
 				);
 			await this.storage.assertNoUnresolvedWrite(proposal.path);
 			if (!owns()) return receipt;

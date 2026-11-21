@@ -523,29 +523,71 @@ it("makes no note mutation if the pending journal tears", async () => {
 	expect(vault.process).not.toHaveBeenCalled();
 });
 
-it("binds Undo to the written file, not its path or bytes, across service rebuilds", async () => {
-	const fx = actionsFixture();
-	const note = fx.vault.getAbstractFileByPath() as TFile & { stat?: unknown };
-	note.stat = { ctime: 7, mtime: 0, size: 1 };
-	const plan = proposal();
-	expect((await fx.service.apply("s", plan)).status).toBe("verified");
-	// Same path, identical bytes, different file: Undo must not touch it.
-	const other = Object.assign(new TFile(path, "Fixture"), {
-		stat: { ctime: 8, mtime: 0, size: 1 },
-	});
-	fx.vault.getAbstractFileByPath.mockReturnValue(other);
-	await expect(fx.service.undo("s", plan.id)).rejects.toThrow(
-		/moved or replaced/,
-	);
-	await expect(fx.restart().undo("s", plan.id)).rejects.toThrow(
-		/moved or replaced/,
-	);
-	expect(fx.text()).toBe(plan.after);
-	// The original file back in place keeps ordinary Undo working, also after a rebuild.
-	fx.vault.getAbstractFileByPath.mockReturnValue(note);
-	expect((await fx.restart().undo("s", plan.id)).status).toBe("undone");
-	expect(fx.text()).toBe(before);
-});
+it.each([7, 8])(
+	"binds Undo across service rebuilds even with replacement ctime %s",
+	async (replacementCtime) => {
+		const fx = actionsFixture();
+		const note = fx.vault.getAbstractFileByPath() as TFile & {
+			stat?: unknown;
+		};
+		note.stat = { ctime: 7, mtime: 0, size: 1 };
+		const plan = proposal();
+		expect((await fx.service.apply("s", plan)).status).toBe("verified");
+		// Same path, identical bytes, different file: Undo must not touch it.
+		const other = Object.assign(new TFile(path, "Fixture"), {
+			stat: { ctime: replacementCtime, mtime: 0, size: 1 },
+		});
+		fx.vault.getAbstractFileByPath.mockReturnValue(other);
+		await expect(fx.service.undo("s", plan.id)).rejects.toThrow(
+			/moved or replaced/,
+		);
+		await expect(fx.restart().undo("s", plan.id)).rejects.toThrow(
+			/moved or replaced/,
+		);
+		expect(fx.text()).toBe(plan.after);
+		// The original file back in place keeps ordinary Undo working, also after a rebuild.
+		fx.vault.getAbstractFileByPath.mockReturnValue(note);
+		expect((await fx.restart().undo("s", plan.id)).status).toBe("undone");
+		expect(fx.text()).toBe(before);
+	},
+);
+
+it.each([undefined, 7])(
+	"does not infer a restored receipt's identity from ctime %s",
+	async (ctime) => {
+		const fx = actionsFixture();
+		const plan = proposal();
+		const note = fx.vault.getAbstractFileByPath();
+		note.stat = { ctime: 7, mtime: 0, size: 1 };
+		expect((await fx.service.apply("s", plan)).status).toBe("verified");
+		await fx.storage.update("s", (state) => ({
+			...state,
+			operations: state.operations.map((row) => ({
+				...row,
+				receipt: { ...row.receipt, ctime },
+			})),
+		}));
+		// A new vault runtime has no retained identity witness, even if metadata matches.
+		const reopened = new NoteActionService({ ...fx.vault }, fx.storage);
+		await expect(reopened.undo("s", plan.id)).rejects.toThrow(
+			/identity|moved or replaced/,
+		);
+		expect(fx.text()).toBe(plan.after);
+		expect(fx.vault.process).toHaveBeenCalledTimes(1);
+		await fx.storage.update("s", (state) => ({
+			...state,
+			operations: state.operations.map((row) => ({
+				...row,
+				receipt: { ...row.receipt, status: "unknown" as const },
+			})),
+		}));
+		expect((await reopened.reconcile("s", plan.id)).status).toBe(
+			"conflict",
+		);
+		expect(fx.text()).toBe(plan.after);
+		expect(fx.vault.process).toHaveBeenCalledTimes(1);
+	},
+);
 
 it("rejects a write when the offered target is replaced before the atomic write", async () => {
 	const fx = actionsFixture();
