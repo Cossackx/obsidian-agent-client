@@ -152,6 +152,8 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 
 	private currentSelection: {
 		filePath: string;
+		/** Editor file at the selection event; refresh carries it, never a path lookup. */
+		file?: TFile;
 		selection: NonNullable<NoteMetadata["selection"]>;
 		snapshot?: SourceSnapshot & { range: TextRange };
 	} | null = null;
@@ -319,11 +321,12 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 			this.currentSelection &&
 			this.currentSelection.filePath === activeFile.path
 		) {
-			// Bind the displayed selection to this file object, not its path.
+			// Carry the file captured with the selection; a same-path occupant
+			// shows the original, so consumers see the mismatch and review.
 			metadata.selection = Object.defineProperty(
 				{ ...this.currentSelection.selection },
 				"file",
-				{ value: activeFile },
+				{ value: this.currentSelection.file },
 			);
 		}
 
@@ -384,8 +387,18 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 		}
 		if (allowCaret) return null;
 		const note = await this.getActiveNote();
-		return note && this.currentSelection?.filePath === note.path
-			? (this.currentSelection.snapshot ?? null)
+		const cached = this.currentSelection;
+		// Only the file that produced the cached selection, still at its path.
+		return note &&
+			cached?.snapshot &&
+			cached.file &&
+			cached.filePath === note.path &&
+			file === cached.file &&
+			this.plugin.app.vault.getAbstractFileByPath(cached.filePath) ===
+				cached.file
+			? Object.defineProperty({ ...cached.snapshot }, "file", {
+					value: cached.file,
+				})
 			: null;
 	}
 
@@ -491,7 +504,10 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 		const { editor, file } = view;
 		const filePath = file.path;
 
-		if (!this.lastSelectionKey.startsWith(`${filePath}:`)) {
+		if (
+			!this.lastSelectionKey.startsWith(`${filePath}:`) ||
+			this.currentSelection?.file !== file
+		) {
 			this.handleSelectionChange(filePath, null);
 		}
 
@@ -517,6 +533,7 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 							},
 						},
 						editor.getValue(),
+						file,
 					);
 					return;
 				}
@@ -590,6 +607,7 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 		filePath: string | null,
 		selection: { from: EditorPosition; to: EditorPosition } | null,
 		buffer?: string,
+		file?: TFile,
 	): void {
 		const selectionKey = filePath
 			? selection
@@ -599,7 +617,8 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 
 		if (
 			selectionKey === this.lastSelectionKey &&
-			buffer === this.currentSelection?.snapshot?.text
+			buffer === this.currentSelection?.snapshot?.text &&
+			file === this.currentSelection?.file
 		) {
 			return;
 		}
@@ -613,6 +632,7 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 					: extractSelection(buffer, selection.from, selection.to);
 			this.currentSelection = {
 				filePath,
+				file,
 				selection: { ...selection, ...excerpt },
 				snapshot:
 					buffer !== undefined && excerpt

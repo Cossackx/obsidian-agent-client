@@ -117,6 +117,14 @@ function choose<T>(
 	});
 }
 
+/** Identity at destination choice; every consumer refuses a substitute. */
+export type DestinationWitness = {
+	sessionId: string;
+	file: TFile | undefined;
+	source: SourceSnapshot;
+	anchor: DestinationAnchor;
+};
+
 export function ContextTray({
 	companion,
 	ownsComposer,
@@ -128,6 +136,7 @@ export function ContextTray({
 	send,
 	onProposals,
 	witnesses,
+	destinationWitness,
 	onClose,
 	followPath,
 }: {
@@ -149,6 +158,8 @@ export function ContextTray({
 	onProposals: (rows: ReplyProposal[]) => void;
 	/** Live only: context item id -> TFile captured with it. */
 	witnesses: Map<string, TFile>;
+	/** Live only, owned by the panel so it outlives the drawer: the destination choice's file. */
+	destinationWitness: React.MutableRefObject<DestinationWitness | null>;
 	onClose: () => void;
 	followPath?: string;
 }) {
@@ -330,16 +341,22 @@ export function ContextTray({
 			},
 		});
 	};
-	const openNotes = () => [
-		...new Set(
-			app.workspace.getLeavesOfType("markdown").flatMap((leaf) => {
-				const file = (leaf.view as { file?: TFile }).file;
-				return file instanceof TFile && isNotePath(file.path)
-					? [file.path]
-					: [];
-			}),
-		),
-	];
+	/** The open leaves' own files, never a path lookup; ambiguous paths are omitted and stale ones refused on use. */
+	const openNotes = () => {
+		const byPath = new Map<string, TFile | null>();
+		for (const leaf of app.workspace.getLeavesOfType("markdown")) {
+			const file = (leaf.view as { file?: TFile }).file;
+			if (!(file instanceof TFile) || !isNotePath(file.path)) continue;
+			const seen = byPath.get(file.path);
+			byPath.set(
+				file.path,
+				seen === undefined || seen === file ? file : null,
+			);
+		}
+		return [...byPath].flatMap(([path, file]) =>
+			file ? [{ path, file }] : [],
+		);
+	};
 	const add = async (scope: "note" | "heading" | "passage") => {
 		if (!sessionId) return;
 		const id = crypto.randomUUID();
@@ -361,13 +378,13 @@ export function ContextTray({
 				lifetime: "turn",
 			};
 		} else {
-			const path = await choose(
+			const note = await choose(
 				app,
 				"Add an open note",
-				openNotes().map((path) => ({ label: path, value: path })),
+				openNotes().map((row) => ({ label: row.path, value: row })),
 			);
-			if (!path) return;
-			const source = await read(path);
+			if (!note) return;
+			const source = await readHeld(note.file, note.path);
 			item = {
 				id,
 				source,
@@ -392,6 +409,7 @@ export function ContextTray({
 			await update((old) => putItem(old, item), `add:${item.id}`);
 	};
 	const destination = async (kind: "note" | "range") => {
+		if (!sessionId) return;
 		let target: DestinationAnchor;
 		if (kind === "range") {
 			const capture = await vaultService.captureActiveSelection(true);
@@ -407,6 +425,7 @@ export function ContextTray({
 			);
 			if (current.current !== sessionId) return;
 			frozenTarget.current = {
+				sessionId,
 				file: capture.file,
 				source: saved,
 				anchor: {
@@ -419,10 +438,7 @@ export function ContextTray({
 		} else {
 			// Bind the offered objects before the first click can await.
 			const offered = new Map(
-				openNotes().map((path) => [
-					path,
-					app.vault.getAbstractFileByPath(path),
-				]),
+				openNotes().map(({ path, file }) => [path, file]),
 			);
 			const path = await choose(
 				app,
@@ -433,8 +449,7 @@ export function ContextTray({
 				})),
 			);
 			if (!path) return;
-			const file = offered.get(path);
-			const held = file instanceof TFile ? file : undefined;
+			const held = offered.get(path);
 			const source = await readHeld(held, path);
 			const options: { label: string; value: DestinationAnchor }[] = [
 				{ label: "End of note", value: { kind: "end", path } },
@@ -455,6 +470,7 @@ export function ContextTray({
 			if (!holds(held, path)) throw replaced();
 			target = picked;
 			frozenTarget.current = {
+				sessionId,
 				file: held,
 				source,
 				anchor: picked,
@@ -466,15 +482,7 @@ export function ContextTray({
 				"destination",
 			);
 	};
-	const frozenTarget = React.useRef<{
-		/** Identity at destination choice; Accept refuses any substitute. */
-		file: TFile | undefined;
-		source: SourceSnapshot;
-		anchor: DestinationAnchor;
-	} | null>(null);
-	React.useEffect(() => {
-		frozenTarget.current = null;
-	}, [sessionId]);
+	const frozenTarget = destinationWitness;
 	const preview = (proposal: NoteEditProposal, file: TFile | undefined) => {
 		if (!sessionId || sessionId !== current.current) return;
 		new NoteActionModal(
@@ -514,6 +522,7 @@ export function ContextTray({
 		// Existing destinations need the identity captured with them (none after restart).
 		if (
 			!captured ||
+			captured.sessionId !== sessionId ||
 			JSON.stringify(captured.anchor) !== JSON.stringify(target) ||
 			!holds(captured.file, target.path)
 		)
@@ -620,6 +629,7 @@ export function ContextTray({
 			intent === "new-note"
 				? undefined
 				: chosen &&
+					  chosen.sessionId === sessionId &&
 					  JSON.stringify(chosen.anchor) ===
 							JSON.stringify(target) &&
 					  holds(chosen.file, target.path)
@@ -1284,17 +1294,20 @@ export function ContextTray({
 										disabled={busy || working}
 										onClick={() =>
 											run(async () => {
-												const path = await choose(
+												const note = await choose(
 													app,
 													"Choose an open Markdown template (optional)",
-													openNotes().map((path) => ({
-														label: path,
-														value: path,
+													openNotes().map((row) => ({
+														label: row.path,
+														value: row,
 													})),
 												);
-												if (path)
+												if (note)
 													setTemplate(
-														await read(path),
+														await readHeld(
+															note.file,
+															note.path,
+														),
 													);
 											})
 										}

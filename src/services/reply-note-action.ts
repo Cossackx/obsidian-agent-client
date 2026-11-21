@@ -18,7 +18,10 @@ export async function insertReply(input: {
 	message: ChatMessage;
 	destination: DestinationAnchor | null;
 	choose: () => Promise<LiteralTarget | null>;
-	bindTarget?: (path: string) => () => boolean;
+	/** Guard from the witness captured when `destination` was chosen; undefined if none is live. */
+	bindTarget?: (
+		destination: Exclude<DestinationAnchor, { kind: "range" }>,
+	) => (() => boolean) | undefined;
 	read: (path: string) => Promise<string>;
 	current: () => boolean;
 	apply: (
@@ -42,8 +45,14 @@ export async function insertReply(input: {
 	if (!target || !current()) return;
 	if (target.kind === "caret" && target.range.start !== target.range.end)
 		throw new Error("Literal insertion cannot replace a selection.");
-	const stillTarget =
-		target.stillTarget ?? (direct && input.bindTarget?.(target.path));
+	const stillTarget = direct
+		? input.bindTarget?.(direct)
+		: target.stillTarget;
+	// A saved destination is only a path: without its choice witness, stop.
+	if (direct && !stillTarget)
+		throw new Error(
+			"The destination note is no longer known. Choose the destination again in Note tools.",
+		);
 	// A path returned by the picker is not proof of what it offered.
 	if (!direct && target.kind !== "caret" && !stillTarget) return;
 	const checkTarget = () => {

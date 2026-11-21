@@ -85,6 +85,8 @@ it("never treats a selection as a caret or writes after an owner change during a
 	await insertReply({
 		...base,
 		destination: { kind: "end", path },
+		// The saved destination now needs its choice witness to proceed at all.
+		bindTarget: () => () => true,
 		choose,
 		current: () => live,
 		read: async () => {

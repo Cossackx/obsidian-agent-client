@@ -44,7 +44,11 @@ import { useChatContext } from "./ChatContext";
 import { useCompanionComposer } from "../hooks/useCompanionComposer";
 import type { SavedSessionInfo } from "../types/session";
 import type { ContextItem } from "../types/note-companion";
-import { ContextTray, type StructuredTurn } from "./ContextTray";
+import {
+	ContextTray,
+	type DestinationWitness,
+	type StructuredTurn,
+} from "./ContextTray";
 import { ReplyNoteActions, type ReplyProposal } from "./ReplyNoteActions";
 import { insertReply } from "../services/reply-note-action";
 import { chooseReplyTarget } from "./ReplyTargetPicker";
@@ -551,6 +555,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 	}, [session.sessionId, variant, plugin]);
 	/** Live only: context item id -> TFile seen when it was captured. */
 	const selectionWitnesses = useRef(new Map<string, TFile>());
+	const destinationWitness = useRef<DestinationWitness | null>(null);
 	const stageSelection = useRef<
 		Parameters<typeof plugin.registerCompanionSelection>[1]
 	>(() => undefined);
@@ -2275,13 +2280,22 @@ export const ChatPanel = React.memo(function ChatPanel({
 							sessionId: state.sessionId,
 							message,
 							destination: target,
-							bindTarget: (path) => {
+							// The witness from the destination choice, never the path's occupant now.
+							bindTarget: (chosen) => {
+								const witness = destinationWitness.current;
+								const file = witness?.file;
+								if (
+									!file ||
+									witness.sessionId !== state.sessionId ||
+									JSON.stringify(witness.anchor) !==
+										JSON.stringify(chosen)
+								)
+									return undefined;
 								const vault = plugin.app.vault;
-								const file = vault.getAbstractFileByPath(path);
 								return () =>
-									!!file &&
-									file.path === path &&
-									vault.getAbstractFileByPath(path) === file;
+									file.path === chosen.path &&
+									vault.getAbstractFileByPath(chosen.path) ===
+										file;
 							},
 							current,
 							read: (path) => vaultService.readNote(path),
@@ -2654,6 +2668,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 					guardedUpdate={guardedUpdate}
 					onProposals={recordReplyProposals}
 					witnesses={selectionWitnesses.current}
+					destinationWitness={destinationWitness}
 					onClose={() => setToolsOpen(false)}
 					followPath={followActivePath}
 					messages={messages}
@@ -2694,9 +2709,12 @@ export const ChatPanel = React.memo(function ChatPanel({
 			const captured = selection
 				? await vaultService.captureActiveSelection()
 				: null;
+			// Write authority only for the very file the displayed selection came from.
+			const shown = selection?.file;
 			if (
 				selection &&
 				(!captured ||
+					(shown && captured.file !== shown) ||
 					captured.path !== chip.path ||
 					!selection.range ||
 					captured.range.start !== selection.range.start ||
@@ -2716,8 +2734,14 @@ export const ChatPanel = React.memo(function ChatPanel({
 				text: await vaultService.readNote(chip.path),
 				capturedAt: Date.now(),
 			};
-			if (captured?.file)
-				selectionWitnesses.current.set(itemId, captured.file);
+			// No displayed identity: frozen context only, never an edit target.
+			if (
+				shown &&
+				captured?.file === shown &&
+				shown.path === captured.path &&
+				plugin.app.vault.getAbstractFileByPath(captured.path) === shown
+			)
+				selectionWitnesses.current.set(itemId, shown);
 			await guardedUpdate(
 				(old) =>
 					putItem(old, {
