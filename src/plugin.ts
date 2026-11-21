@@ -354,6 +354,7 @@ export default class AgentClientPlugin extends Plugin {
 			},
 			sourceExists,
 			captured,
+			file,
 		).catch(
 			(error: unknown) =>
 				new Notice(

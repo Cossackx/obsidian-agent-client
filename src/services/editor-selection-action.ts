@@ -21,6 +21,8 @@ export type SelectionStage = (
 	range: TextRange,
 	purpose: SelectionPurpose,
 	check: MutationGuard,
+	/** Live identity at selection time; never persisted. */
+	file?: unknown,
 ) => Promise<void>;
 export type SelectionOwner = { stage: SelectionStage; owns: () => boolean };
 export const selectionActions = [
@@ -63,6 +65,7 @@ export async function stageEditorSelection(
 	activate: () => Promise<SelectionOwner | undefined>,
 	sourceExists: () => boolean,
 	captured = captureEditorSelection(editor, path),
+	file?: unknown,
 ) {
 	const { source, range } = captured;
 	const checkSource = () => {
@@ -87,7 +90,7 @@ export async function stageEditorSelection(
 		checkSource();
 	};
 	check();
-	await owner.stage(source, range, purpose, check);
+	await owner.stage(source, range, purpose, check, file);
 }
 
 const editSeed = "Suggest a revision to the selected passage.";

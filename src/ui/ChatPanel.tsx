@@ -451,7 +451,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 	const flushDraft = companion.flush;
 	const invalidateComposer = composer.invalidate;
 	const prepareRestore = useCallback(
-		async (replace = false) => {
+		async (replace = false, retireNow = true) => {
 			const replacingIssuedTurn = replace && dispatched.current;
 			if (
 				changingOwner.current ||
@@ -463,7 +463,8 @@ export const ChatPanel = React.memo(function ChatPanel({
 					"Wait for the current conversation operation to finish.",
 				);
 			changingOwner.current = true;
-			invalidateComposer();
+			// Fork retires pending reply actions only once replacement succeeds.
+			if (retireNow) invalidateComposer();
 			const finish = () => {
 				changingOwner.current = false;
 			};
@@ -496,6 +497,15 @@ export const ChatPanel = React.memo(function ChatPanel({
 		},
 		[prepareRestore],
 	);
+	const clearMessages = agent.clearMessages;
+	const clearForReplacement = useCallback(() => {
+		invalidateComposer();
+		clearMessages();
+	}, [invalidateComposer, clearMessages]);
+	const prepareFork = useCallback(
+		() => prepareRestore(false, false),
+		[prepareRestore],
+	);
 	const withRestoreOwner = useRestoreOwner(
 		plugin.viewRegistry,
 		viewId,
@@ -512,8 +522,8 @@ export const ChatPanel = React.memo(function ChatPanel({
 		getCurrentTranscript: agent.getCurrentTranscript,
 		onIgnoreUpdates: agent.setIgnoreUpdates,
 		withRestoreOwner,
-		onClearMessages: agent.clearMessages,
-		prepareTransition: prepareRestore,
+		onClearMessages: clearForReplacement,
+		prepareTransition: prepareFork,
 	});
 	const historyOwner = useRef<SavedSessionInfo | null>(null);
 	const knownRoute = useRef<{
@@ -553,11 +563,12 @@ export const ChatPanel = React.memo(function ChatPanel({
 			);
 		return {
 			owns: ownsComposer,
-			stage: (source, range, purpose, check) =>
+			stage: (source, range, purpose, check, selected) =>
 				runMutation(async () => {
 					check();
 					// Identity at selection time; Send/Accept must prove this same file.
-					const file = vault.getAbstractFileByPath(source.path);
+					const file =
+						selected ?? vault.getAbstractFileByPath?.(source.path);
 					const itemId = await stageCapturedSelection(
 						source,
 						range,
