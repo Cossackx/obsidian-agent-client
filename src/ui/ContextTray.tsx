@@ -119,7 +119,8 @@ function choose<T>(
 
 /** Identity at destination choice; every consumer refuses a substitute. */
 export type DestinationWitness = {
-	sessionId: string;
+	/** The composer lease that made the choice; a returning session ID is a new owner. */
+	owner: object;
 	file: TFile | undefined;
 	source: SourceSnapshot;
 	anchor: DestinationAnchor;
@@ -128,6 +129,7 @@ export type DestinationWitness = {
 export function ContextTray({
 	companion,
 	ownsComposer,
+	owner,
 	runMutation,
 	guardedUpdate,
 	messages,
@@ -142,6 +144,8 @@ export function ContextTray({
 }: {
 	companion: ReturnType<typeof useNoteCompanion>;
 	ownsComposer: () => boolean;
+	/** Current composer lease; destination witnesses are valid only for it. */
+	owner: object;
 	runMutation: <T>(
 		work: () => Promise<T>,
 		surfaceAlive: () => boolean,
@@ -423,9 +427,10 @@ export function ContextTray({
 				saved.text,
 				capture.range,
 			);
-			if (current.current !== sessionId) return;
+			// A retired chooser never publishes into the next owner.
+			if (!surfaceAlive()) return;
 			frozenTarget.current = {
-				sessionId,
+				owner,
 				file: capture.file,
 				source: saved,
 				anchor: {
@@ -468,9 +473,10 @@ export function ContextTray({
 			const picked = await choose(app, `Placement in ${path}`, options);
 			if (!picked) return;
 			if (!holds(held, path)) throw replaced();
+			if (!surfaceAlive()) return;
 			target = picked;
 			frozenTarget.current = {
-				sessionId,
+				owner,
 				file: held,
 				source,
 				anchor: picked,
@@ -522,7 +528,8 @@ export function ContextTray({
 		// Existing destinations need the identity captured with them (none after restart).
 		if (
 			!captured ||
-			captured.sessionId !== sessionId ||
+			captured.owner !== owner ||
+			!surfaceAlive() ||
 			JSON.stringify(captured.anchor) !== JSON.stringify(target) ||
 			!holds(captured.file, target.path)
 		)
@@ -629,7 +636,8 @@ export function ContextTray({
 			intent === "new-note"
 				? undefined
 				: chosen &&
-					  chosen.sessionId === sessionId &&
+					  chosen.owner === owner &&
+					  surfaceAlive() &&
 					  JSON.stringify(chosen.anchor) ===
 							JSON.stringify(target) &&
 					  holds(chosen.file, target.path)

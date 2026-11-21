@@ -512,6 +512,13 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 		}
 
 		const emitSelection = () => {
+			// Bind file, path and editor at the event: a reused leaf may now show another note.
+			const file = view.file;
+			if (!file || view.editor !== editor) {
+				this.handleSelectionChange(null, null);
+				return;
+			}
+			const filePath = file.path;
 			if (view.getMode() !== "source") {
 				this.handleSelectionChange(filePath, null);
 				return;

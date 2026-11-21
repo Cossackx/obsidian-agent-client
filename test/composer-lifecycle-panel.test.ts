@@ -512,6 +512,8 @@ import AgentClientPlugin from "../src/plugin";
 import { stageEditorSelection } from "../src/services/editor-selection-action";
 import { VaultService } from "../src/services/vault-service";
 import { MarkdownView } from "obsidian";
+import { EditorState, type TransactionSpec } from "@codemirror/state";
+import { EditorView, type ViewUpdate } from "@codemirror/view";
 import { NoteActionService } from "../src/services/note-action-service";
 function attachVault(
 	h: Mounted,
@@ -1337,6 +1339,121 @@ it.each(["stable", "refresh after swap"])(
 		await act(async () => h.input.onSendMessage("about this passage"));
 		off();
 		if (mode === "stable") {
+			expect(m.confirm).not.toHaveBeenCalled();
+			expect(h.prompt).toHaveBeenCalledTimes(1);
+		} else expect(h.prompt).not.toHaveBeenCalled();
+	},
+);
+
+it.each(["same ownership", "owner returned"])(
+	"D1 the destination witness lives with its composer ownership: %s",
+	async (mode) => {
+		const before = "# Plan\nBODY\n";
+		const h = await mount({ tools: true, messages: [literalReply] });
+		const a = attachVault(h, fakeFile("Brief.md"), before);
+		openSourceEditor(h, a);
+		await act(async () => h.row.onTools());
+		await chooseSectionDestination(h);
+		if (mode === "owner returned") {
+			// The reused panel owns C, then A again; A's anchor survives, its old choice must not.
+			h.session.sessionId = "C";
+			await h.render();
+			h.session.sessionId = "A";
+			await h.render();
+		}
+		expect((await load(h)).destination).toBeDefined();
+		await act(async () => proposalActions(h)!.onInsert());
+		if (mode === "same ownership") {
+			expect(a.v.process).toHaveBeenCalledExactlyOnceWith(
+				a.original,
+				expect.any(Function),
+			);
+			return;
+		}
+		expect(a.v.process).not.toHaveBeenCalled();
+		expect([...a.data.values()]).toEqual([before, before]);
+		expect(m.notice.mock.calls.flat().join(" ")).toMatch(
+			/choose the destination again/i,
+		);
+	},
+);
+
+it.each(["selection on B", "A returns before send"])(
+	"D2 a selection event binds the leaf's file at that event: %s",
+	async (mode) => {
+		const h = await mount({ follow: true });
+		const a = attachVault(h);
+		a.data.set(a.original, "HEADBODY-A");
+		a.data.set(a.other, "DIFFBODY-B");
+		const view = openSourceEditor(h, a);
+		let state = EditorState.create(),
+			start = 0,
+			active = true;
+		Object.assign(view.editor, {
+			getValue: () => a.data.get(view.file)!,
+			somethingSelected: () => true,
+			hasFocus: () => true,
+			listSelections: () => [
+				{
+					anchor: { line: 0, ch: start },
+					head: { line: 0, ch: start + 4 },
+				},
+			],
+			cm: {
+				dispatch: (spec: TransactionSpec) => {
+					state = state.update(spec).state;
+				},
+			},
+		});
+		// The path resolves to whichever file the leaf shows now.
+		Object.assign(a.v, {
+			on: () => ({}),
+			getMarkdownFiles: () => [view.file],
+			getAbstractFileByPath: () => view.file,
+		});
+		h.vaultAccess.readNote = async () => a.data.get(view.file);
+		Object.assign(h.plugin.app, {
+			metadataCache: { getFileCache: () => ({}) },
+		});
+		Object.assign(h.plugin.app.workspace, {
+			getActiveViewOfType: () => (active ? view : null),
+		});
+		// Real tracker; the fixture plugin is the same shape the harness passes elsewhere.
+		const svc = new VaultService(h.plugin as never);
+		Object.assign(h.vaultAccess, {
+			getActiveNote: () => svc.getActiveNote(),
+			captureActiveSelection: (caret?: boolean) =>
+				svc.captureActiveSelection(caret),
+		});
+		const refresh = () => h.input.suggestions.mentions.updateActiveNote();
+		let off = noop;
+		await act(async () => {
+			off = svc.subscribeSelectionChanges(() => void refresh());
+		});
+		const shown = () => h.input.suggestions.mentions.activeNote?.selection;
+		expect(shown()?.file).toBe(a.original);
+		// The same leaf now shows B; no leaf change, only a genuine selection on B.
+		view.file = a.other;
+		start = 4;
+		const listeners = state.facet(EditorView.updateListener);
+		expect(listeners).toHaveLength(1);
+		// The listener reads only these two update flags.
+		const update = { selectionSet: true, docChanged: false } as ViewUpdate;
+		await act(async () => listeners[0](update));
+		expect(shown()?.text).toBe("BODY");
+		expect(shown()?.file).toBe(a.other);
+		if (mode === "A returns before send") {
+			active = false;
+			const leafChange = h.events.get("active-leaf-change") as (
+				leaf: unknown,
+			) => void;
+			await act(async () => leafChange({ view: {} }));
+			view.file = a.original;
+			await act(async () => refresh());
+		}
+		await act(async () => h.input.onSendMessage("about this passage"));
+		off();
+		if (mode === "selection on B") {
 			expect(m.confirm).not.toHaveBeenCalled();
 			expect(h.prompt).toHaveBeenCalledTimes(1);
 		} else expect(h.prompt).not.toHaveBeenCalled();

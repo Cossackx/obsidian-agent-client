@@ -556,6 +556,9 @@ export const ChatPanel = React.memo(function ChatPanel({
 	/** Live only: context item id -> TFile seen when it was captured. */
 	const selectionWitnesses = useRef(new Map<string, TFile>());
 	const destinationWitness = useRef<DestinationWitness | null>(null);
+	// Retire a choice with its ownership instance; drawer reopen keeps the lease.
+	if (destinationWitness.current?.owner !== composer.lease)
+		destinationWitness.current = null;
 	const stageSelection = useRef<
 		Parameters<typeof plugin.registerCompanionSelection>[1]
 	>(() => undefined);
@@ -2286,7 +2289,8 @@ export const ChatPanel = React.memo(function ChatPanel({
 								const file = witness?.file;
 								if (
 									!file ||
-									witness.sessionId !== state.sessionId ||
+									witness.owner !== composer.lease ||
+									!ownsComposer() ||
 									JSON.stringify(witness.anchor) !==
 										JSON.stringify(chosen)
 								)
@@ -2664,6 +2668,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 					key={session.sessionId ?? "unbound"}
 					companion={companion}
 					ownsComposer={ownsComposer}
+					owner={composer.lease}
 					runMutation={runMutation}
 					guardedUpdate={guardedUpdate}
 					onProposals={recordReplyProposals}

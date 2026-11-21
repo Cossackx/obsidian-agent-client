@@ -87,6 +87,8 @@ export function useCompanionComposer(sessionId: string | null) {
 		changeDraft,
 		changeFiles,
 		ownsComposer,
+		/** This ownership instance; replaced on invalidate and on every owner change. */
+		lease,
 		invalidate,
 		send,
 	};
