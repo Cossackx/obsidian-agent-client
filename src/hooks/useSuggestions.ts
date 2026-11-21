@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo, useEffect } from "react";
+import { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import type { NoteMetadata, IVaultAccess } from "../services/vault-service";
 import {
 	detectMention,
@@ -23,7 +23,11 @@ export interface MentionsState {
 	context: MentionContext | null;
 
 	/** Update mention suggestions based on current input */
-	updateSuggestions: (input: string, cursorPosition: number) => Promise<void>;
+	updateSuggestions: (
+		input: string,
+		cursorPosition: number,
+		current?: () => boolean,
+	) => Promise<void>;
 	/** Select a note from the dropdown. Returns updated input text */
 	selectSuggestion: (input: string, suggestion: NoteMetadata) => string;
 	/** Navigate the dropdown selection */
@@ -146,8 +150,10 @@ export function useSuggestions(
 	// Mention Callbacks
 	// ============================================================
 
+	const lookup = useRef(0);
 	const mentionUpdateSuggestions = useCallback(
-		async (input: string, cursorPosition: number) => {
+		async (input: string, cursorPosition: number, current = () => true) => {
+			const request = ++lookup.current;
 			const ctx = detectMention(input, cursorPosition);
 
 			if (!ctx) {
@@ -158,6 +164,7 @@ export function useSuggestions(
 			}
 
 			const results = await vaultAccess.searchNotes(ctx.query);
+			if (request !== lookup.current || !current()) return;
 			setMentionSuggestions(results);
 			setMentionSelectedIndex(0);
 			setMentionContext(ctx);
@@ -177,6 +184,7 @@ export function useSuggestions(
 				suggestion.path,
 			);
 
+			lookup.current++;
 			setMentionSuggestions([]);
 			setMentionSelectedIndex(0);
 			setMentionContext(null);
@@ -203,6 +211,7 @@ export function useSuggestions(
 	);
 
 	const mentionClose = useCallback(() => {
+		lookup.current++;
 		setMentionSuggestions([]);
 		setMentionSelectedIndex(0);
 		setMentionContext(null);

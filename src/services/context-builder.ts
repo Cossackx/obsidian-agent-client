@@ -3,6 +3,7 @@ import type {
 	CompanionState,
 	ContextItem,
 	ContextQuote,
+	ContextScope,
 	TextRange,
 } from "../types/note-companion";
 import { selectionPositions, truncateText } from "../utils/selection";
@@ -112,6 +113,24 @@ export function contextText(item: ContextItem): string {
 	return item.source.text.slice(item.scope.range.start, item.scope.range.end);
 }
 
+export function capturedExtentKey(
+	path: string,
+	scope: ContextScope,
+	text: string,
+	role?: ContextItem["role"],
+	annotation?: string,
+) {
+	return JSON.stringify([
+		path,
+		scope.kind,
+		scope.kind === "note" ? null : [scope.range.start, scope.range.end],
+		scope.kind === "heading" ? [scope.heading, scope.occurrence] : null,
+		text,
+		role,
+		annotation,
+	]);
+}
+
 export interface PreparedContext {
 	readonly id: string;
 	readonly blocks: readonly PromptContent[];
@@ -141,12 +160,13 @@ export function prepareContext(
 			throw new Error("Invalid source path");
 		if (item.role === "destination") continue;
 		const exact = contextText(item);
-		const key = JSON.stringify([
+		const key = capturedExtentKey(
 			item.source.path,
 			item.scope,
 			exact,
+			item.role,
 			item.annotation,
-		]);
+		);
 		sentItemIds.push(item.id);
 		if (seen.has(key)) continue;
 		seen.add(key);
@@ -194,6 +214,8 @@ export function prepareContext(
 			path: item.source.path,
 			provenance: "captured",
 			itemId: item.id,
+			role: item.role,
+			annotation: item.annotation,
 			text,
 			capturedAt: item.source.capturedAt,
 			scope: item.scope,

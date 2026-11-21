@@ -1145,6 +1145,60 @@ it("real synthesis callback requires a correlated reply, not a session-local old
 	expect(button(view.current.tray, "Exact.md · passage 2–6")).toBeDefined();
 });
 
+it("does not publish a correlated terminal reply into a replacement transcript with the same ID", async () => {
+	let finish!: () => void;
+	const pending = new Promise<void>((resolve) => {
+		finish = resolve;
+	});
+	let started!: () => void;
+	const entered = new Promise<void>((resolve) => {
+		started = resolve;
+	});
+	const onConfirmed = vi.fn();
+	const session = { sessionId: "A" } as never;
+	const transport = {
+		hasLiveSession: () => true,
+		sendPrompt: async () => {
+			started();
+			await pending;
+		},
+	} as never;
+	const view = await mount(() =>
+		useAgentMessages(
+			transport,
+			settingsAccess as never,
+			{} as never,
+			session,
+			noop,
+		),
+	);
+	let send!: Promise<void>;
+	await act(async () => {
+		send = view.current.sendMessage("Original request", {
+			vaultBasePath: "/test",
+			structuredRequestId: "request-A",
+			onConfirmed,
+		});
+		await entered;
+		view.current.enqueueUpdate({
+			type: "agent_message_chunk",
+			sessionId: "A",
+			text: JSON.stringify({
+				requestId: "request-A",
+				result: "Original reply",
+			}),
+		});
+	});
+	const userId = view.current.messages[0].id;
+	await act(async () => view.current.setMessagesFromLocal([]));
+	await act(async () => {
+		finish();
+		await send;
+	});
+	expect(view.current.messages).toEqual([]);
+	expect(onConfirmed).toHaveBeenCalledExactlyOnceWith("", userId, "", []);
+});
+
 it.each([false, true])(
 	"typed editorial quotes record only transmitted extent in sidecar; embedded=%s",
 	async (embeddedContext) => {

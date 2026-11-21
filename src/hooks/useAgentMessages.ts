@@ -52,6 +52,7 @@ export interface SendMessageOptions {
 		notices: readonly string[],
 	) => Promise<boolean>;
 	structuredRequestId?: string;
+	onDispatch?: () => void;
 	onConfirmed?: (
 		reply: string,
 		userMessageId: string,
@@ -137,6 +138,10 @@ export function useAgentMessages(
 	const [transcriptVersion, replaceTranscript] = useState(0);
 	// React renders are a projection of this transcript, not its source of truth.
 	const transcript = useRef<TranscriptSnapshot>({ version: 0, messages });
+	const mounted = useRef(true);
+	const ownerEpoch = useRef({ id: session.sessionId });
+	if (ownerEpoch.current.id !== session.sessionId)
+		ownerEpoch.current = { id: session.sessionId };
 	const onReplace = useRef<((snapshot: TranscriptSnapshot) => void) | null>(
 		null,
 	);
@@ -157,7 +162,12 @@ export function useAgentMessages(
 	// the previous one to settle before starting (avoids interleaved sends).
 	const sendPromiseRef = useRef<Promise<void> | null>(null);
 	const preparingRef = useRef(false);
-	const replyRef = useRef<{ sessionId: string; text: string } | null>(null);
+	const replyRef = useRef<{
+		sessionId: string;
+		text: string;
+		live: () => boolean;
+		structured: boolean;
+	} | null>(null);
 
 	// ============================================================
 	// Streaming Update Batching
@@ -198,12 +208,15 @@ export function useAgentMessages(
 	const enqueueUpdate = useCallback(
 		(update: SessionUpdate) => {
 			if (ignoreUpdatesRef.current) return;
+			const request = replyRef.current;
+			if (request?.sessionId === update.sessionId && !request.live())
+				return;
 			if (
 				update.type === "agent_message_chunk" &&
-				replyRef.current?.sessionId === update.sessionId
+				request?.structured &&
+				request.sessionId === update.sessionId
 			) {
-				if (replyRef.current.text.length <= 180_000)
-					replyRef.current.text += update.text;
+				if (request.text.length <= 180_000) request.text += update.text;
 				return;
 			}
 			// Some agents echo the prompt back as a user_message_chunk while
@@ -225,7 +238,9 @@ export function useAgentMessages(
 
 	// Clean up on unmount
 	useEffect(() => {
+		mounted.current = true;
 		return () => {
+			mounted.current = false;
 			pendingUpdatesRef.current = [];
 			flushScheduledRef.current = false;
 			toolCallIndexRef.current.clear();
@@ -347,6 +362,15 @@ export function useAgentMessages(
 
 			// Wait for any in-flight send to settle (e.g. after cancel/stop)
 			// before starting a new one to avoid interleaved state updates.
+			const currentSessionId = session.sessionId;
+			const owner = ownerEpoch.current;
+			const version = transcript.current.version;
+			const ownsTranscript = () =>
+				mounted.current &&
+				ownerEpoch.current === owner &&
+				owner.id === currentSessionId &&
+				transcript.current.version === version &&
+				options.canDispatch?.() !== false;
 			if (sendPromiseRef.current) {
 				try {
 					await sendPromiseRef.current;
@@ -355,7 +379,7 @@ export function useAgentMessages(
 				}
 			}
 
-			const currentSessionId = session.sessionId;
+			if (!ownsTranscript()) return;
 			const generation = ++generationRef.current;
 			const settings = settingsAccess.getSnapshot();
 
@@ -405,7 +429,7 @@ export function useAgentMessages(
 				if (
 					!agentClient.hasLiveSession(currentSessionId) ||
 					generation !== generationRef.current ||
-					options.canDispatch?.() === false
+					!ownsTranscript()
 				)
 					return;
 
@@ -457,9 +481,18 @@ export function useAgentMessages(
 				setIsSending(true);
 
 				const sendPromise = (async () => {
-					const reply = { sessionId: currentSessionId, text: "" };
-					if (options.structuredRequestId) replyRef.current = reply;
+					const live = () =>
+						generationRef.current === generation &&
+						ownsTranscript();
+					const reply = {
+						sessionId: currentSessionId,
+						text: "",
+						live,
+						structured: !!options.structuredRequestId,
+					};
+					replyRef.current = reply;
 					try {
+						options.onDispatch?.();
 						const result = await sendPreparedPrompt(
 							{
 								sessionId: currentSessionId,
@@ -473,8 +506,18 @@ export function useAgentMessages(
 							agentClient,
 						);
 
-						// Discard results if a newer send has started
-						if (generationRef.current !== generation) return;
+						// A confirmed RPC still belongs to the original turn. It must
+						// not publish an assistant reply into a replaced transcript.
+						if (!live()) {
+							if (result.success)
+								options.onConfirmed?.(
+									"",
+									userMessage.id,
+									"",
+									prepared.sources,
+								);
+							return;
+						}
 
 						if (result.success) {
 							setIsSending(false);
@@ -535,7 +578,7 @@ export function useAgentMessages(
 							);
 						}
 					} catch (error) {
-						if (generationRef.current !== generation) return;
+						if (!live()) return;
 						setIsSending(false);
 						setErrorInfo({
 							title: "Send Message Failed",

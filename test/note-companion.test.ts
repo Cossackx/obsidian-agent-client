@@ -11,6 +11,7 @@ import {
 	moveItem,
 } from "../src/services/companion-state";
 import { CompanionStorage } from "../src/services/companion-storage";
+import { guardCompanionChange } from "../src/services/companion-mutation";
 import { NoteActionService } from "../src/services/note-action-service";
 import {
 	describeNoteTarget,
@@ -75,6 +76,34 @@ const limits = {
 	maxNoteLength: 100,
 	maxSelectionLength: 100,
 };
+
+it("rechecks the original lease after the recovery slot lookup but before issuing a write", async () => {
+	const { adapter, storage } = fixture();
+	let owns = true,
+		transformed = false;
+	const exists = adapter.exists.getMockImplementation()!;
+	adapter.exists.mockImplementation(async (path) => {
+		if (transformed && path.endsWith(".next")) owns = false;
+		return exists(path);
+	});
+	await expect(
+		storage.update(
+			"A",
+			guardCompanionChange(
+				() => owns,
+				(old) => {
+					transformed = true;
+					return {
+						...old,
+						items: [item("Draft.md", "Expired passage")],
+					};
+				},
+			),
+		),
+	).rejects.toThrow("Conversation changed");
+	expect(adapter.write).not.toHaveBeenCalled();
+	expect(await storage.load("A")).toBeNull();
+});
 
 it("preview_blocks_are_the_sent_blocks and destination-only bodies are excluded", async () => {
 	const selected = item("a/Same.md", "before 🐙\r\nTARGET after");

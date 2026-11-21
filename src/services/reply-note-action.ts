@@ -8,15 +8,17 @@ import type {
 import { mapStoredRange } from "../utils/selection";
 import { planLiteralEdit } from "./note-edit-planner";
 
-export type LiteralTarget =
+export type LiteralTarget = (
 	| Exclude<DestinationAnchor, { kind: "range" }>
-	| { kind: "caret"; path: string; text: string; range: TextRange };
+	| { kind: "caret"; path: string; text: string; range: TextRange }
+) & { stillTarget?: () => boolean };
 
 export async function insertReply(input: {
 	sessionId: string;
 	message: ChatMessage;
 	destination: DestinationAnchor | null;
 	choose: () => Promise<LiteralTarget | null>;
+	bindTarget?: (path: string) => () => boolean;
 	read: (path: string) => Promise<string>;
 	current: () => boolean;
 	apply: (
@@ -32,15 +34,28 @@ export async function insertReply(input: {
 		.flatMap((part) => (part.type === "text" ? [part.text] : []))
 		.join("\n\n");
 	if (message.role !== "assistant" || !literal.trim() || !current()) return;
-	const target =
+	const direct =
 		destination && destination.kind !== "range"
 			? structuredClone(destination)
-			: await choose();
+			: null;
+	const target: LiteralTarget | null = direct ?? (await choose());
 	if (!target || !current()) return;
 	if (target.kind === "caret" && target.range.start !== target.range.end)
 		throw new Error("Literal insertion cannot replace a selection.");
+	const stillTarget =
+		target.stillTarget ?? (direct && input.bindTarget?.(target.path));
+	// A path returned by the picker is not proof of what it offered.
+	if (!direct && target.kind !== "caret" && !stillTarget) return;
+	const checkTarget = () => {
+		if (stillTarget && !stillTarget())
+			throw new Error(
+				"The selected note moved or was replaced. Choose the destination again.",
+			);
+	};
+	checkTarget();
 	const text = await read(target.path);
 	if (!current()) return;
+	checkTarget();
 	const proposal = planLiteralEdit(
 		{ path: target.path, text, capturedAt: Date.now() },
 		target.kind === "caret"
@@ -54,5 +69,9 @@ export async function insertReply(input: {
 		target.kind === "caret" ? "insert" : "append",
 		id,
 	);
-	return apply(sessionId, proposal, current);
+	return apply(
+		sessionId,
+		proposal,
+		stillTarget ? () => current() && stillTarget() : current,
+	);
 }

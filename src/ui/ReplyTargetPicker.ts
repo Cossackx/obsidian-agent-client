@@ -1,10 +1,22 @@
-import { FuzzySuggestModal, type App } from "obsidian";
+import { FuzzySuggestModal, TFile, type App } from "obsidian";
 import type { LiteralTarget } from "../services/reply-note-action";
 import { isNotePath } from "../services/context-builder";
+
+export function bindReplyTarget(
+	app: App,
+	path: string,
+	file = app.vault.getAbstractFileByPath(path),
+) {
+	return () =>
+		file instanceof TFile &&
+		file.path === path &&
+		app.vault.getAbstractFileByPath(path) === file;
+}
 
 export function chooseReplyTarget(
 	app: App,
 	caret?: Extract<LiteralTarget, { kind: "caret" }>,
+	onInvalid?: () => void,
 ) {
 	return new Promise<LiteralTarget | null>((resolve) => {
 		const choices: LiteralTarget[] = [
@@ -12,7 +24,11 @@ export function chooseReplyTarget(
 			...app.vault
 				.getMarkdownFiles()
 				.filter((file) => isNotePath(file.path))
-				.map(({ path }) => ({ kind: "end" as const, path })),
+				.map((file) => ({
+					kind: "end" as const,
+					path: file.path,
+					stillTarget: bindReplyTarget(app, file.path, file),
+				})),
 		];
 		new (class extends FuzzySuggestModal<LiteralTarget> {
 			getItems() {
@@ -24,6 +40,11 @@ export function chooseReplyTarget(
 					: `Append to ${target.path}`;
 			}
 			onChooseItem(target: LiteralTarget) {
+				if (target.stillTarget && !target.stillTarget()) {
+					onInvalid?.();
+					resolve(null);
+					return;
+				}
 				resolve(target);
 			}
 			onClose() {

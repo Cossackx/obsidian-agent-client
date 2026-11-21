@@ -43,6 +43,7 @@ export interface UseChatActionsReturn {
 			| "approvePayload"
 			| "onConfirmed"
 			| "canDispatch"
+			| "onDispatch"
 			| "generatedInstruction"
 			| "structuredRequestId"
 		>,
@@ -52,8 +53,9 @@ export interface UseChatActionsReturn {
 		requestedAgentId?: string,
 		forceFresh?: boolean,
 	) => Promise<void>;
+	isNewChatNoOp: (requestedAgentId?: string, forceFresh?: boolean) => boolean;
 	handleExportChat: () => Promise<void>;
-	handleSwitchAgent: (agentId: string) => Promise<void>;
+
 	handleRestartAgent: () => Promise<void>;
 
 	// Config actions
@@ -176,6 +178,7 @@ export function useChatActions(
 				| "preparedContext"
 				| "approvePayload"
 				| "canDispatch"
+				| "onDispatch"
 				| "onConfirmed"
 				| "generatedInstruction"
 				| "structuredRequestId"
@@ -289,19 +292,22 @@ export function useChatActions(
 		await agent.cancelOperation();
 	}, [logger, agent.cancelOperation]);
 
+	const isNewChatNoOp = useCallback(
+		(requestedAgentId?: string, forceFresh = false) =>
+			!forceFresh &&
+			messages.length === 0 &&
+			(!requestedAgentId || requestedAgentId === session.agentId) &&
+			!!session.sessionId &&
+			hasLiveSession,
+		[messages.length, session.agentId, session.sessionId, hasLiveSession],
+	);
 	const handleNewChat = useCallback(
 		async (requestedAgentId?: string, forceFresh = false) => {
 			const isAgentSwitch =
 				requestedAgentId && requestedAgentId !== session.agentId;
 
 			// Skip if already empty AND not switching agents
-			if (
-				!forceFresh &&
-				messages.length === 0 &&
-				!isAgentSwitch &&
-				session.sessionId &&
-				hasLiveSession
-			) {
+			if (isNewChatNoOp(requestedAgentId, forceFresh)) {
 				new Notice("[Agent Client] Already a new session");
 				return;
 			}
@@ -338,7 +344,7 @@ export function useChatActions(
 			session,
 			logger,
 			autoExportIfEnabled,
-			hasLiveSession,
+			isNewChatNoOp,
 			plugin,
 			agent.isSending,
 			agent.cancelOperation,
@@ -372,15 +378,6 @@ export function useChatActions(
 			logger.error("Export error:", error);
 		}
 	}, [messages, session, plugin, logger]);
-
-	const handleSwitchAgent = useCallback(
-		async (agentId: string) => {
-			if (agentId !== session.agentId) {
-				await handleNewChat(agentId);
-			}
-		},
-		[session.agentId, handleNewChat],
-	);
 
 	const handleRestartAgent = useCallback(async () => {
 		logger.log("[ChatPanel] Restarting agent process...");
@@ -449,8 +446,9 @@ export function useChatActions(
 		handleSendMessage,
 		handleStopGeneration,
 		handleNewChat,
+		isNewChatNoOp,
 		handleExportChat,
-		handleSwitchAgent,
+
 		handleRestartAgent,
 		handleSetMode,
 		handleSetConfigOption,

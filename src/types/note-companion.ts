@@ -88,6 +88,8 @@ export interface CompanionState {
 			originalLength?: number;
 			provenance?: "captured" | "mention" | "following";
 			itemId?: string;
+			role?: Exclude<ContextItem["role"], "destination">;
+			annotation?: string;
 			quoteKind?: "template" | "approved-destination";
 			currentPath?: string;
 			positions?: { from: SourcePosition; to: SourcePosition };

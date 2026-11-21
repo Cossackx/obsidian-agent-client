@@ -493,7 +493,7 @@ export function ContextTray({
 			intent: "Review captured passages",
 			items,
 			onReply: (text, id) => {
-				if (current.current !== sessionId) return;
+				if (!ownsComposer()) return;
 				try {
 					const rows = validatePassageRevisions(text, items).flatMap(
 						(revision) => {
@@ -515,13 +515,15 @@ export function ContextTray({
 						},
 					);
 					onProposals(rows);
-					setMessage(
-						"Review the proposed changes on the reply below.",
-					);
+					if (surfaceAlive())
+						setMessage(
+							"Review the proposed changes on the reply below.",
+						);
 				} catch {
-					setMessage(
-						"Reply did not match the requested passages. No write actions were created.",
-					);
+					if (surfaceAlive())
+						setMessage(
+							"Reply did not match the requested passages. No write actions were created.",
+						);
 				}
 			},
 		});
@@ -612,7 +614,7 @@ export function ContextTray({
 			intent: `Request editorial proposal (${intent}) for ${target.path}`,
 			quotes,
 			onReply: (result, generatedId) => {
-				if (current.current !== sessionId) return;
+				if (!ownsComposer()) return;
 				try {
 					const proposal = validateCaptureProposal(
 						result,
@@ -629,13 +631,15 @@ export function ContextTray({
 							},
 						},
 					]);
-					setMessage(
-						"Review the proposed changes on the reply below.",
-					);
+					if (surfaceAlive())
+						setMessage(
+							"Review the proposed changes on the reply below.",
+						);
 				} catch {
-					setMessage(
-						"Reply did not match the editorial request. No write actions were created.",
-					);
+					if (surfaceAlive())
+						setMessage(
+							"Reply did not match the editorial request. No write actions were created.",
+						);
 				}
 			},
 		});
@@ -1339,6 +1343,7 @@ export function ContextTray({
 																await plugin.noteActions.undo(
 																	state.sessionId,
 																	proposal.id,
+																	surfaceAlive,
 																);
 															new Notice(
 																`${result.path}: ${result.status}`,

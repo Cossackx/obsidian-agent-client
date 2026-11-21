@@ -398,6 +398,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 	const [isUpdateAvailable, setIsUpdateAvailable] = useState(false);
 
 	const composer = useCompanionComposer(session.sessionId);
+	const composerTextarea = useRef<HTMLTextAreaElement>(null);
 	const { companion, inputValue, attachedFiles } = composer;
 	const ownsComposer = () =>
 		composer.ownsComposer() &&
@@ -414,6 +415,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 	const stageFilesRef = useRef(setAttachedFiles);
 	stageFilesRef.current = setAttachedFiles;
 	const preparingCompanion = useRef(false);
+	const dispatched = useRef(false);
 	const changingOwner = useRef(false);
 	const busySending = useRef(isSending);
 	busySending.current = isSending;
@@ -448,29 +450,52 @@ export const ChatPanel = React.memo(function ChatPanel({
 	};
 	const flushDraft = companion.flush;
 	const invalidateComposer = composer.invalidate;
-	const prepareRestore = useCallback(async () => {
-		if (
-			changingOwner.current ||
-			preparingCompanion.current ||
-			mutations.busy ||
-			busySending.current
-		)
-			throw new Error(
-				"Wait for the current conversation operation to finish.",
-			);
-		changingOwner.current = true;
-		invalidateComposer();
-		const finish = () => {
-			changingOwner.current = false;
-		};
-		try {
-			await flushDraft();
-		} catch (error) {
-			finish();
-			throw error;
-		}
-		return finish;
-	}, [flushDraft, invalidateComposer, mutations]);
+	const prepareRestore = useCallback(
+		async (replace = false) => {
+			const replacingIssuedTurn = replace && dispatched.current;
+			if (
+				changingOwner.current ||
+				mutations.busy ||
+				(!replacingIssuedTurn &&
+					(preparingCompanion.current || busySending.current))
+			)
+				throw new Error(
+					"Wait for the current conversation operation to finish.",
+				);
+			changingOwner.current = true;
+			invalidateComposer();
+			const finish = () => {
+				changingOwner.current = false;
+			};
+			try {
+				await flushDraft();
+			} catch (error) {
+				finish();
+				throw error;
+			}
+			return finish;
+		},
+		[flushDraft, invalidateComposer, mutations],
+	);
+	const transitionConversation = useCallback(
+		async (work: () => Promise<void>) => {
+			let finish: (() => void) | undefined;
+			try {
+				finish = await prepareRestore(true);
+				if (mounted.current) await work();
+			} catch (error) {
+				if (mounted.current)
+					new Notice(
+						error instanceof Error
+							? error.message
+							: "Could not change conversations.",
+					);
+			} finally {
+				finish?.();
+			}
+		},
+		[prepareRestore],
+	);
 	const withRestoreOwner = useRestoreOwner(
 		plugin.viewRegistry,
 		viewId,
@@ -690,10 +715,10 @@ export const ChatPanel = React.memo(function ChatPanel({
 	const {
 		handleSendMessage,
 		handleStopGeneration,
-		handleNewChat,
+		handleNewChat: startNewChat,
+		isNewChatNoOp,
 		handleExportChat,
-		handleSwitchAgent,
-		handleRestartAgent,
+		handleRestartAgent: restartAgent,
 		handleSetMode,
 		handleSetConfigOption,
 		handleClearError,
@@ -852,20 +877,39 @@ export const ChatPanel = React.memo(function ChatPanel({
 					plugin.settings.displaySettings.maxSelectionLength,
 			});
 			const represented = representedItems(snapshot.items);
+			const captureNotices: string[] = [];
 			const selection = suggestions.mentions.activeNote?.selection;
-			if (
-				following &&
-				followActivePath &&
-				selection?.range &&
-				selection.text !== undefined
-			) {
-				represented.push({
-					path: followActivePath,
-					provenance: "following",
-					text: selection.text,
-					scope: { kind: "passage", range: selection.range },
-					positions: selection,
-				});
+			if (!turn && following && followActivePath && selection) {
+				let valid = false;
+				try {
+					// Check that the note still exists, and use the actual editor
+					// selection where available (not the cached follow metadata).
+					await vaultService.readNote(followActivePath);
+					const live =
+						await vaultService.captureActiveSelection(true);
+					valid =
+						!!live &&
+						live.stillTarget?.() !== false &&
+						live.path === followActivePath &&
+						live.range.start === selection.range?.start &&
+						live.range.end === selection.range.end &&
+						live.text.slice(live.range.start, live.range.end) ===
+							selection.text;
+				} catch {
+					// An unverified capture is only eligible for explicit review.
+				}
+				if (!valid)
+					captureNotices.push(
+						`${followActivePath}: could not verify the followed selection; review the frozen excerpt.`,
+					);
+				if (selection.range && selection.text !== undefined)
+					represented.push({
+						path: followActivePath,
+						provenance: "following",
+						text: selection.text,
+						scope: { kind: "passage", range: selection.range },
+						positions: selection,
+					});
 			}
 			const mentionPaths = new Set(
 				extractMentionedNotes(content, vaultService).flatMap(
@@ -887,7 +931,9 @@ export const ChatPanel = React.memo(function ChatPanel({
 							};
 							represented.push(entry);
 						} catch {
-							/* No exact capture; any outbound bytes require review. */
+							captureNotices.push(
+								`${path}: could not verify the note represented by the mention.`,
+							);
 						}
 					}),
 				);
@@ -902,11 +948,18 @@ export const ChatPanel = React.memo(function ChatPanel({
 						: turn?.text,
 					structuredRequestId: requestId,
 					canDispatch: ownsComposer,
+					onDispatch: () => {
+						dispatched.current = true;
+					},
 					approvePayload: async (blocks, sources, notices) => {
 						const decision = decideSendReview({
 							sources,
 							represented,
-							notices: [...prepared.notices, ...notices],
+							notices: [
+								...prepared.notices,
+								...captureNotices,
+								...notices,
+							],
 							generated: !!turn,
 							requested,
 						});
@@ -966,6 +1019,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 			);
 			return false;
 		} finally {
+			dispatched.current = false;
 			preparingCompanion.current = false;
 			setPreviewing(false);
 		}
@@ -1001,25 +1055,35 @@ export const ChatPanel = React.memo(function ChatPanel({
 			forceFresh = false,
 			transitioning = false,
 		) => {
-			let finish: (() => void) | undefined;
-			try {
-				if (!transitioning) finish = await prepareRestore();
-				if (!mounted.current) return;
-				await handleNewChat(requestedAgentId, forceFresh);
-				if (requestedAgentId) onAgentIdChanged?.(requestedAgentId);
-			} catch (error) {
-				if (transitioning) throw error;
-				if (mounted.current)
-					new Notice(
-						error instanceof Error
-							? error.message
-							: "Could not open a new conversation.",
-					);
-			} finally {
-				finish?.();
-			}
+			// A failed staged edit is work in this conversation, even with an
+			// empty transcript. New replaces that owner, rather than replaying it.
+			const fresh = forceFresh || companion.hasPendingContext();
+			const change = async () => {
+				await startNewChat(requestedAgentId, fresh);
+				if (requestedAgentId && mounted.current) {
+					lastInitAgentRef.current = requestedAgentId;
+					onAgentIdChanged?.(requestedAgentId);
+				}
+			};
+			if (transitioning || isNewChatNoOp(requestedAgentId, fresh))
+				await change();
+			else await transitionConversation(change);
 		},
-		[handleNewChat, onAgentIdChanged, prepareRestore],
+		[
+			startNewChat,
+			onAgentIdChanged,
+			isNewChatNoOp,
+			transitionConversation,
+			companion.hasPendingContext,
+		],
+	);
+	const handleNewChat = handleNewChatWithPersist;
+	const handleSwitchAgent = (id: string) => {
+		if (id !== session.agentId) return handleNewChat(id);
+	};
+	const handleRestartAgent = useCallback(
+		() => transitionConversation(restartAgent),
+		[transitionConversation, restartAgent],
 	);
 
 	// ============================================================
@@ -1032,16 +1096,17 @@ export const ChatPanel = React.memo(function ChatPanel({
 	}, [plugin]);
 
 	const handleNewChatInDirectory = useCallback(
-		async (directory: string) => {
-			// Auto-export current chat before switching
-			if (messages.length > 0) {
-				await autoExportIfEnabled("newChat", messages, session);
-			}
-			agent.clearMessages();
-			setAgentCwd(directory);
-			await agent.restartSession(undefined, directory);
-			sessionHistory.invalidateCache();
-		},
+		(directory: string) =>
+			transitionConversation(async () => {
+				// Auto-export current chat before switching
+				if (messages.length > 0) {
+					await autoExportIfEnabled("newChat", messages, session);
+				}
+				agent.clearMessages();
+				setAgentCwd(directory);
+				await agent.restartSession(undefined, directory);
+				sessionHistory.invalidateCache();
+			}),
 		[
 			messages,
 			session,
@@ -1049,6 +1114,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 			agent.clearMessages,
 			agent.restartSession,
 			sessionHistory.invalidateCache,
+			transitionConversation,
 		],
 	);
 
@@ -1337,6 +1403,14 @@ export const ChatPanel = React.memo(function ChatPanel({
 		const resolvedAgent =
 			directive ||
 			getDefaultAgentId(plugin.settingsService.getSnapshot());
+		if (hasInitializedRef.current) {
+			void transitionConversation(async () => {
+				lastInitAgentRef.current = resolvedAgent;
+				agent.clearMessages();
+				await agent.createSession(resolvedAgent);
+			});
+			return;
+		}
 		hasInitializedRef.current = true;
 		lastInitAgentRef.current = resolvedAgent;
 		if (initialConversationId) {
@@ -1373,12 +1447,14 @@ export const ChatPanel = React.memo(function ChatPanel({
 		void agent.createSession(resolvedAgent);
 	}, [
 		agent.createSession,
+		agent.clearMessages,
 		agent.updateSessionFromLoad,
 		agent.setMessagesFromLocal,
 		config?.agent,
 		initialAgentId,
 		initialConversationId,
 		withRestoreOwner,
+		transitionConversation,
 		plugin,
 		logger,
 	]);
@@ -2106,6 +2182,14 @@ export const ChatPanel = React.memo(function ChatPanel({
 							sessionId: state.sessionId,
 							message,
 							destination: target,
+							bindTarget: (path) => {
+								const vault = plugin.app.vault;
+								const file = vault.getAbstractFileByPath(path);
+								return () =>
+									!!file &&
+									file.path === path &&
+									vault.getAbstractFileByPath(path) === file;
+							},
 							current,
 							read: (path) => vaultService.readNote(path),
 							apply: (id, proposal, owns) =>
@@ -2122,6 +2206,10 @@ export const ChatPanel = React.memo(function ChatPanel({
 										caret.range.start === caret.range.end
 										? { ...caret, kind: "caret" }
 										: undefined,
+									() =>
+										new Notice(
+											"The selected note moved or was replaced. Choose the destination again.",
+										),
 								);
 							},
 						}),
@@ -2227,7 +2315,14 @@ export const ChatPanel = React.memo(function ChatPanel({
 				}
 			};
 			if (id) await withRestoreOwner(id, restore);
-			else await restore(() => mounted.current);
+			else {
+				const finish = await prepareRestore();
+				try {
+					if (mounted.current) await restore(() => mounted.current);
+				} finally {
+					finish();
+				}
+			}
 		} catch (error) {
 			if (mounted.current)
 				new Notice(
@@ -2283,13 +2378,24 @@ export const ChatPanel = React.memo(function ChatPanel({
 						!selected.length
 					)
 						return;
-					await plugin.companionStorage.update(id, (old) => ({
-						...old,
-						items: selected.map((item) => ({
-							...item,
-							id: crypto.randomUUID(),
-						})),
-					}));
+					await plugin.companionStorage.update(
+						id,
+						guardCompanionChange(
+							() =>
+								mounted.current &&
+								acpClient.getConfirmedSessionId() === id,
+							(old) => ({
+								...old,
+								items: [
+									...old.items,
+									...selected.map((item) => ({
+										...item,
+										id: crypto.randomUUID(),
+									})),
+								],
+							}),
+						),
+					);
 				} finally {
 					finish();
 					setReconnecting(false);
@@ -2417,7 +2523,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 					{companion.warning}{" "}
 					<button
 						type="button"
-						onClick={() => void companion.retry()}
+						onClick={() => chipWork(() => companion.retry())}
 					>
 						Retry local save or load
 					</button>
@@ -2471,6 +2577,18 @@ export const ChatPanel = React.memo(function ChatPanel({
 		await guardedUpdate(
 			(old) => ({
 				...old,
+				followDismissed:
+					old.followDismissed ||
+					(old.items.some(
+						(item) =>
+							item.id === chip.itemId &&
+							item.source.path === followActivePath,
+					) &&
+						!old.items.some(
+							(item) =>
+								item.id !== chip.itemId &&
+								item.source.path === followActivePath,
+						)),
 				items: old.items.filter((row) => row.id !== chip.itemId),
 			}),
 			`item:${chip.itemId}:remove`,
@@ -2526,10 +2644,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 					row.id === chip.itemId
 						? {
 								...row,
-								lifetime:
-									row.lifetime === "session"
-										? "turn"
-										: "session",
+								lifetime: chip.pinned ? "turn" : "session",
 							}
 						: row,
 				),
@@ -2570,54 +2685,78 @@ export const ChatPanel = React.memo(function ChatPanel({
 						: "Context did not change",
 				),
 		);
+	const stageNotesWithinGate = async (paths: string[]) => {
+		const snapshot = companion.state;
+		if (!snapshot)
+			throw new Error(
+				"Wait for the conversation to load before adding notes.",
+			);
+		const existing = new Set(
+			snapshot.items
+				.filter(
+					(row) =>
+						row.role !== "destination" && row.scope.kind === "note",
+				)
+				.map((row) => row.source.path),
+		);
+		const incoming = noteDropPaths(paths).filter(
+			(path) => !existing.has(path),
+		);
+		const captures = await Promise.allSettled(
+			incoming.map(
+				async (path): Promise<ContextItem> => ({
+					id: crypto.randomUUID(),
+					source: {
+						path,
+						text: await vaultService.readNote(path),
+						capturedAt: Date.now(),
+					},
+					scope: { kind: "note" },
+					lifetime: "turn",
+					role: "reference",
+				}),
+			),
+		);
+		const items = captures.flatMap((capture) =>
+			capture.status === "fulfilled" ? [capture.value] : [],
+		);
+		if (items.length)
+			await guardedUpdate(
+				(old) => stageDroppedNotes(old, items),
+				`add:${crypto.randomUUID()}`,
+			);
+		const failed = incoming.filter(
+			(_, i) => captures[i].status === "rejected",
+		);
+		if (failed.length)
+			throw new Error(`Could not stage: ${failed.join(", ")}`);
+	};
 	const stageNotes = (paths: string[]) =>
-		runMutation(async () => {
-			const snapshot = companion.state;
-			if (!snapshot)
-				throw new Error(
-					"Wait for the conversation to load before adding notes.",
-				);
-			const existing = new Set(
-				snapshot.items
-					.filter(
-						(row) =>
-							row.role !== "destination" &&
-							row.scope.kind === "note",
-					)
-					.map((row) => row.source.path),
-			);
-			const incoming = noteDropPaths(paths).filter(
-				(path) => !existing.has(path),
-			);
-			const captures = await Promise.allSettled(
-				incoming.map(
-					async (path): Promise<ContextItem> => ({
-						id: crypto.randomUUID(),
-						source: {
-							path,
-							text: await vaultService.readNote(path),
-							capturedAt: Date.now(),
-						},
-						scope: { kind: "note" },
-						lifetime: "turn",
-						role: "reference",
-					}),
-				),
-			);
-			const items = captures.flatMap((capture) =>
-				capture.status === "fulfilled" ? [capture.value] : [],
-			);
-			if (items.length)
-				await guardedUpdate(
-					(old) => stageDroppedNotes(old, items),
-					`add:${crypto.randomUUID()}`,
-				);
-			const failed = incoming.filter(
-				(_, i) => captures[i].status === "rejected",
-			);
-			if (failed.length)
-				throw new Error(`Could not stage: ${failed.join(", ")}`);
+		runMutation(() => stageNotesWithinGate(paths));
+	const openNoteLookup = async () => {
+		if (!canMutate() || mutations.busy) return;
+		const draft = inputValueRef.current;
+		const text = draft.endsWith("@")
+			? draft
+			: `${draft}${draft && !/\s$/.test(draft) ? " " : ""}@`;
+		updateCompanionDraft(text);
+		suggestions.commands.close();
+		window.requestAnimationFrame(() => {
+			if (!ownsComposer() || inputValueRef.current !== text) return;
+			const textarea = composerTextarea.current;
+			textarea?.focus();
+			textarea?.setSelectionRange(text.length, text.length);
 		});
+		try {
+			await suggestions.mentions.updateSuggestions(
+				text,
+				text.length,
+				ownsComposer,
+			);
+		} catch {
+			if (ownsComposer()) new Notice("Could not search for notes.");
+		}
+	};
 	const contextRow = companion.state ? (
 		<ComposerContext
 			chips={contextChips}
@@ -2629,9 +2768,9 @@ export const ChatPanel = React.memo(function ChatPanel({
 			onAdd={(event) => {
 				const menu = new Menu();
 				menu.addItem((item: MenuItem) =>
-					item.setTitle("Add note…").onClick(() => {
-						updateCompanionDraft(`${inputValueRef.current}@`);
-					}),
+					item
+						.setTitle("Add note…")
+						.onClick(() => void openNoteLookup()),
 				);
 				menu.addItem((item: MenuItem) =>
 					item
@@ -2683,6 +2822,10 @@ export const ChatPanel = React.memo(function ChatPanel({
 			autoMentionEnabled={settings.autoMentionActiveNote}
 			contextRow={contextRow}
 			onStageNotes={stageNotes}
+			onStageAttachments={(work) =>
+				runMutation(() => work(stageNotesWithinGate))
+			}
+			composerTextarea={composerTextarea}
 			suggestions={suggestions}
 			plugin={plugin}
 			view={viewHost}

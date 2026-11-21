@@ -6,9 +6,12 @@ import {
 	emptyCompanion,
 } from "../services/companion-state";
 import { useChatContext } from "../ui/ChatContext";
-import { CompanionMutationExpired } from "../services/companion-mutation";
+import {
+	CompanionMutationExpired,
+	type CompanionChange,
+} from "../services/companion-mutation";
 
-type Change = (state: CompanionState) => CompanionState;
+type Change = CompanionChange;
 export function useNoteCompanion(
 	sessionId: string | null,
 	restoreDraft: (draft: string) => void,
@@ -60,11 +63,15 @@ export function useNoteCompanion(
 			let attempted: ContextItem[] = [];
 			let retryChange = change;
 			let readbackUnavailable = false;
+			let intended: CompanionState | undefined;
+			const checked = (transform: Change): Change =>
+				Object.assign(transform, { check: change.check });
 			try {
 				const result = isAdd
 					? await storage.update(
 							id,
-							(old) => {
+							checked((old) => {
+								change.check?.();
 								const present = new Set(
 									old.items.map((item) => item.id),
 								);
@@ -84,7 +91,7 @@ export function useNoteCompanion(
 											items: [...old.items, ...attempted],
 										}
 									: old;
-							},
+							}),
 							(readback) => {
 								readbackUnavailable = readback === undefined;
 								const present = new Set(
@@ -96,13 +103,53 @@ export function useNoteCompanion(
 									: attempted.filter(
 											(item) => !present.has(item.id),
 										);
-								retryChange = (old) => ({
+								retryChange = checked((old) => ({
 									...old,
-									items: [...old.items, ...remaining],
-								});
+									items: [
+										...old.items,
+										...remaining.filter(
+											(item) =>
+												!revisions.current.has(
+													JSON.stringify([
+														id,
+														`item:${item.id}:remove`,
+													]),
+												),
+										),
+									],
+								}));
 							},
 						)
-					: await storage.update(id, change);
+					: change.check
+						? await storage.update(
+								id,
+								checked((old) => {
+									change.check?.();
+									const next = change(old);
+									return (intended =
+										JSON.stringify(old) ===
+										JSON.stringify(next)
+											? old
+											: next);
+								}),
+								(readback) => {
+									readbackUnavailable =
+										readback === undefined;
+									if (
+										readbackUnavailable ||
+										(intended &&
+											JSON.stringify(readback) ===
+												JSON.stringify(intended))
+									) {
+										// Only reload: the first operation may already have committed.
+										retryChange = checked((old) => {
+											change.check?.();
+											return old;
+										});
+									}
+								},
+							)
+						: await storage.update(id, change);
 				if (revisions.current.get(key) === revision)
 					failed.current.delete(key);
 				if (active.current === id) {
@@ -124,7 +171,7 @@ export function useNoteCompanion(
 				if (active.current === id)
 					setWarning(
 						readbackUnavailable
-							? "Could not verify added context. Refresh and re-add only missing items."
+							? "Could not verify the context change. Refresh before reapplying it."
 							: error instanceof Error
 								? error.message
 								: "Companion state could not be saved",
@@ -216,6 +263,10 @@ export function useNoteCompanion(
 			: Promise.resolve();
 	return {
 		state: state?.sessionId === sessionId ? state : null,
+		hasPendingContext: () =>
+			[...failed.current.values()].some(
+				(entry) => entry.id === sessionId && !!entry.change.check,
+			),
 		warning,
 		update,
 		flush,

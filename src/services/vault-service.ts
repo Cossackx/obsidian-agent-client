@@ -325,7 +325,10 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 
 	async captureActiveSelection(
 		allowCaret = false,
-	): Promise<(SourceSnapshot & { range: TextRange }) | null> {
+	): Promise<
+		| (SourceSnapshot & { range: TextRange; stillTarget?: () => boolean })
+		| null
+	> {
 		const workspace = this.plugin.app.workspace;
 		const active = workspace.getActiveViewOfType(MarkdownView);
 		const file = workspace.getActiveFile();
@@ -340,6 +343,8 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 			);
 		const view = active ?? (open.length === 1 ? open[0] : null);
 		if (view?.file && view.getMode() === "source") {
+			const file = view.file;
+			const path = file.path;
 			const selection = view.editor.listSelections()[0];
 			if (!selection) return null;
 			const text = view.editor.getValue();
@@ -349,7 +354,19 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 				selection.head ?? selection.anchor,
 			);
 			return allowCaret || range.start < range.end
-				? { path: view.file.path, text, range, capturedAt: Date.now() }
+				? {
+						path,
+						text,
+						range,
+						capturedAt: Date.now(),
+						...(allowCaret && {
+							stillTarget: () =>
+								file.path === path &&
+								this.plugin.app.vault.getAbstractFileByPath(
+									path,
+								) === file,
+						}),
+					}
 				: null;
 		}
 		if (allowCaret) return null;

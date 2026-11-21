@@ -1,4 +1,8 @@
-import { contextText, type PreparedContext } from "./context-builder";
+import {
+	capturedExtentKey,
+	contextText,
+	type PreparedContext,
+} from "./context-builder";
 import type {
 	ContextItem,
 	ContextScope,
@@ -11,21 +15,38 @@ export interface RepresentedSource {
 	text: string;
 	provenance: "captured" | "mention" | "following";
 	itemId?: string;
+	role?: ContextItem["role"];
+	annotation?: string;
 	positions?: { from: SourcePosition; to: SourcePosition };
 }
 
 export function representedItems(
 	items: readonly ContextItem[],
 ): RepresentedSource[] {
+	const seen = new Set<string>();
 	return items
 		.filter((item) => item.role !== "destination")
 		.map((item) => ({
 			path: item.source.path,
 			scope: item.scope,
 			text: contextText(item),
-			provenance: "captured",
+			provenance: "captured" as const,
 			itemId: item.id,
-		}));
+			role: item.role,
+			annotation: item.annotation,
+		}))
+		.filter((source) => {
+			const key = capturedExtentKey(
+				source.path,
+				source.scope,
+				source.text,
+				source.role,
+				source.annotation,
+			);
+			if (seen.has(key)) return false;
+			seen.add(key);
+			return true;
+		});
 }
 
 function identity(source: RepresentedSource): string {
@@ -35,6 +56,8 @@ function identity(source: RepresentedSource): string {
 		source.path,
 		source.provenance,
 		source.itemId,
+		source.role,
+		source.annotation,
 		source.text,
 		scope.kind,
 		scope.kind === "note" ? null : [scope.range.start, scope.range.end],
@@ -72,21 +95,23 @@ export function decideSendReview(input: SendReviewInput): SendReviewDecision {
 	if (input.generated)
 		reasons.push("This turn includes generated instructions.");
 	reasons.push(...input.notices);
-	const shown = new Set(input.represented.map(identity));
+	const shown = input.represented.map((source) => ({
+		source,
+		key: identity(source),
+	}));
 	for (const source of input.sources) {
 		const path = source.currentPath ?? source.path;
 		if (path !== source.path)
 			reasons.push(`${source.path} was renamed to ${path}.`);
-		if (
-			!source.quoteKind &&
-			(!source.provenance ||
-				!shown.delete(
-					identity({ ...source, provenance: source.provenance }),
-				))
-		)
+		const key =
+			source.provenance &&
+			identity({ ...source, provenance: source.provenance });
+		const match = shown.findIndex((entry) => entry.key === key);
+		if (!source.quoteKind && match < 0)
 			reasons.push(
 				`${path} (${source.scope.kind}) does not match an exact source shown in the composer.`,
 			);
+		else if (!source.quoteKind) shown.splice(match, 1);
 		if (
 			source.originalLength !== undefined &&
 			source.originalLength > source.text.length
@@ -97,6 +122,10 @@ export function decideSendReview(input: SendReviewInput): SendReviewDecision {
 		if (source.quoteKind)
 			reasons.push(`${path} is included as ${source.quoteKind}.`);
 	}
+	for (const { source } of shown)
+		reasons.push(
+			`${source.path} (${source.scope.kind}) does not appear as shown in the prepared turn.`,
+		);
 	const unique = [...new Set(reasons)];
 	return { required: unique.length > 0, reasons: unique };
 }

@@ -14,17 +14,27 @@ export function assertMutation(owns: () => boolean): MutationGuard {
 	};
 }
 
-/** Check both before queueing and inside the serialized storage update. */
+export type CompanionChange = ((old: CompanionState) => CompanionState) & {
+	check?: MutationGuard;
+};
+
+/** Carry the same guard through wrapper transforms and the final write. */
 export function guardCompanionChange(
 	owns: () => boolean,
-	change: (old: CompanionState) => CompanionState,
-) {
-	const check = assertMutation(owns);
-	check();
-	return (old: CompanionState) => {
-		check();
-		return change(old);
+	change: CompanionChange,
+): CompanionChange {
+	const check = () => {
+		assertMutation(owns)();
+		change.check?.();
 	};
+	check();
+	return Object.assign(
+		(old: CompanionState) => {
+			check();
+			return change(old);
+		},
+		{ check },
+	);
 }
 
 /** Shared by every surface staging context in one composer. Busy operations

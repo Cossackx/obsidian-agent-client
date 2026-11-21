@@ -28,6 +28,7 @@ describe("decideSendReview", () => {
 			scope: { kind: "passage", range: { start: 0, end: 6 } },
 			itemId: "passage",
 			provenance: "captured",
+			role: "reference",
 		});
 		const represented = representedItems([
 			item("A.md", {
@@ -129,6 +130,41 @@ describe("decideSendReview", () => {
 		).toBe(true);
 		expect(decide(source("D.md", "t"))).toBe(true);
 	});
+	it.each([false, true])(
+		"checks both directions and only deduplicates equivalent sources (embedded=%s)",
+		(embeddedContext) => {
+			const original = item("A.md", {
+				annotation: "Original annotation",
+			});
+			const duplicate = { ...original, id: "duplicate" };
+			const represented = representedItems([original, duplicate]);
+			const prepare = (...items: ContextItem[]) =>
+				prepareContext(items, {
+					embeddedContext,
+					maxNoteLength: 100,
+					maxSelectionLength: 100,
+				});
+			const decide = (sources: ReturnType<typeof prepare>["sources"]) =>
+				decideSendReview({ ...base, represented, sources }).required;
+			const exact = prepare(original, duplicate);
+			expect(exact.sentItemIds).toEqual([original.id, duplicate.id]);
+			expect(exact.sources).toHaveLength(1);
+			expect(decide(exact.sources)).toBe(false);
+			expect(decide([])).toBe(true);
+			expect(
+				decide(
+					prepare({ ...original, annotation: "Different annotation" })
+						.sources,
+				),
+			).toBe(true);
+			expect(
+				decide(prepare({ ...original, role: "working" }).sources),
+			).toBe(true);
+			expect(
+				prepare(original, { ...duplicate, role: "working" }).sources,
+			).toHaveLength(2);
+		},
+	);
 });
 
 const item = (path: string, extra: Partial<ContextItem> = {}): ContextItem => ({

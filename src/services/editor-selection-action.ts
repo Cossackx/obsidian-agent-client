@@ -13,7 +13,7 @@ import {
 	validatePassageRevisions,
 } from "./passage-review";
 import { planLiteralEdit } from "./note-edit-planner";
-import type { MutationGuard } from "./companion-mutation";
+import type { CompanionChange, MutationGuard } from "./companion-mutation";
 
 export type SelectionPurpose = "ask" | "suggest-edit";
 export type SelectionStage = (
@@ -98,9 +98,7 @@ export async function stageCapturedSelection(
 	range: TextRange,
 	purpose: SelectionPurpose,
 	check: MutationGuard,
-	update: (
-		change: (old: CompanionState) => CompanionState,
-	) => Promise<unknown>,
+	update: (change: CompanionChange) => Promise<unknown>,
 	changeDraft: (change: (old: string) => string) => void,
 ) {
 	const selectionEdit = purpose === "suggest-edit";
@@ -112,22 +110,27 @@ export async function stageCapturedSelection(
 		lifetime: "turn",
 		...(selectionEdit && { selectionEdit }),
 	};
-	await update((old) => {
-		check();
-		return putItem(
-			selectionEdit
-				? {
-						...old,
-						items: old.items.map((row) =>
-							row.selectionEdit
-								? { ...row, selectionEdit: undefined }
-								: row,
-						),
-					}
-				: old,
-			item,
-		);
-	});
+	await update(
+		Object.assign(
+			(old: CompanionState) => {
+				check();
+				return putItem(
+					selectionEdit
+						? {
+								...old,
+								items: old.items.map((row) =>
+									row.selectionEdit
+										? { ...row, selectionEdit: undefined }
+										: row,
+								),
+							}
+						: old,
+					item,
+				);
+			},
+			{ check },
+		),
+	);
 	if (selectionEdit)
 		changeDraft((old) =>
 			old.endsWith(editSeed)

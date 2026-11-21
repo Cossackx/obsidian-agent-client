@@ -479,11 +479,13 @@ export async function preparePrompt(
 ): Promise<PreparePromptResult> {
 	const excluded = new Set(input.preparedContext?.excludedPaths);
 	const paths = new Set<string>();
+	const unresolved = new Set<string>();
 	const mentionedNotes =
 		input.generatedInstruction !== undefined
 			? []
 			: extractMentionedNotes(input.message, mentionService).filter(
-					({ file }) => {
+					({ file, noteTitle }) => {
+						if (!file) unresolved.add(noteTitle);
 						if (
 							!file ||
 							excluded.has(file.path) ||
@@ -510,6 +512,26 @@ export async function preparePrompt(
 	const prepared = await (base.supportsEmbeddedContext
 		? preparePromptWithEmbeddedContext(base, vaultAccess, mentionedNotes)
 		: preparePromptWithTextContext(base, vaultAccess, mentionedNotes));
+	const mentionBodies = new Set(
+		prepared.sources
+			.filter((s) => s.provenance === "mention")
+			.map((s) => s.path),
+	);
+	prepared.notices = [
+		...(prepared.notices ?? []),
+		...[...unresolved].map(
+			(name) => `Mention could not be resolved: ${name}.`,
+		),
+		...mentionedNotes.flatMap(({ file }) =>
+			file && !mentionBodies.has(file.path)
+				? [`No note text was included for ${file.path}.`]
+				: [],
+		),
+		...(buildSystemInstructions(base).length &&
+		(base.supportsEmbeddedContext || !base.message.startsWith("/"))
+			? ["This turn adds configured Markdown formatting instructions."]
+			: []),
+	];
 	if (input.preparedContext) {
 		prepared.agentContent.push(...input.preparedContext.blocks);
 		prepared.sources.push(...input.preparedContext.sources);

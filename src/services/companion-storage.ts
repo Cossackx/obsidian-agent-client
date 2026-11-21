@@ -9,6 +9,7 @@ import type {
 } from "../types/note-companion";
 import { isNotePath } from "./context-builder";
 import { emptyCompanion } from "./companion-state";
+import type { CompanionChange, MutationGuard } from "./companion-mutation";
 
 const object = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
@@ -138,6 +139,11 @@ function assertState(
 							item.quoteKind === "approved-destination") &&
 						(item.currentPath === undefined ||
 							path(item.currentPath)) &&
+						(item.role === undefined ||
+							item.role === "reference" ||
+							item.role === "working") &&
+						(item.annotation === undefined ||
+							str(item.annotation)) &&
 						(item.originalLength === undefined ||
 							(typeof item.originalLength === "number" &&
 								Number.isSafeInteger(item.originalLength) &&
@@ -248,13 +254,18 @@ export class CompanionStorage {
 	private async read(sessionId: string): Promise<CompanionState | null> {
 		return (await this.slots(sessionId))[0]?.state ?? null;
 	}
-	private async persist(sessionId: string, state: CompanionState) {
+	private async persist(
+		sessionId: string,
+		state: CompanionState,
+		check?: MutationGuard,
+	) {
 		const [latest] = await this.slots(sessionId);
 		const primary = this.file(sessionId);
 		const target = latest?.path === primary ? `${primary}.next` : primary;
 		const raw = latest
 			? JSON.stringify({ revision: latest.revision + 1, state })
 			: JSON.stringify(state);
+		check?.();
 		await this.adapter.write(target, raw);
 		if ((await this.adapter.read(target)) !== raw)
 			throw new Error("Companion save could not be verified");
@@ -313,7 +324,7 @@ export class CompanionStorage {
 	}
 	update(
 		sessionId: string,
-		change: (state: CompanionState) => CompanionState,
+		change: CompanionChange,
 		onUnconfirmed?: (readback: CompanionState | null | undefined) => void,
 	): Promise<CompanionState> {
 		return this.enqueue(async () => {
@@ -327,7 +338,7 @@ export class CompanionStorage {
 				if (!onUnconfirmed || state !== previous) {
 					if (!(await this.adapter.exists(this.directory)))
 						await this.adapter.mkdir(this.directory);
-					await this.persist(sessionId, state);
+					await this.persist(sessionId, state, change.check);
 				}
 			} catch (error) {
 				// Read the durable slot before a queued edit or removal can run.
@@ -342,10 +353,7 @@ export class CompanionStorage {
 			return state;
 		});
 	}
-	updateExisting(
-		sessionId: string,
-		change: (state: CompanionState) => CompanionState,
-	): Promise<void> {
+	updateExisting(sessionId: string, change: CompanionChange): Promise<void> {
 		return this.enqueue(async () => {
 			if (this.deleted.has(sessionId)) return;
 			const previous = await this.read(sessionId);
@@ -353,7 +361,7 @@ export class CompanionStorage {
 			const state = change(previous);
 			if (state === previous) return;
 			assertState(state, sessionId);
-			await this.persist(sessionId, state);
+			await this.persist(sessionId, state, change.check);
 			for (const listener of this.listeners) listener(state);
 		});
 	}

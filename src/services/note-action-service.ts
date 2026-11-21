@@ -3,6 +3,7 @@ import type { NoteEditProposal, WriteReceipt } from "../types/note-companion";
 import { CompanionStorage, proposalIsValid } from "./companion-storage";
 
 class Conflict extends Error {}
+class OwnerCancelled extends Conflict {}
 
 /** Shared per vault so two conversations cannot race the same path. */
 export class NoteActionService {
@@ -63,7 +64,9 @@ export class NoteActionService {
 		before: string,
 		after: string,
 		owns: () => boolean,
-	): Promise<void> {
+	): Promise<TFile> {
+		if (!owns())
+			throw new OwnerCancelled("The originating conversation changed");
 		const file = this.vault.getAbstractFileByPath(path);
 		if (!(file instanceof TFile) || file.path !== path)
 			throw new Conflict("Destination is missing or changed");
@@ -71,13 +74,27 @@ export class NoteActionService {
 			throw new Conflict("Atomic note editing is unavailable");
 		await this.vault.process(file, (current) => {
 			if (!owns())
-				throw new Conflict("The originating conversation changed");
+				throw new OwnerCancelled(
+					"The originating conversation changed",
+				);
 			if (!this.canWrite(path, before))
 				throw new Conflict("Unsaved changes in the destination editor");
-			if (file.path !== path || current !== before)
+			if (
+				file.path !== path ||
+				this.vault.getAbstractFileByPath(path) !== file ||
+				current !== before
+			)
 				throw new Conflict("The destination changed after preview");
 			return after;
 		});
+		return file;
+	}
+	private async verified(file: TFile, path: string, expected: string) {
+		return (
+			(await this.vault.read(file)) === expected &&
+			file.path === path &&
+			this.vault.getAbstractFileByPath(path) === file
+		);
 	}
 	apply(
 		sessionId: string,
@@ -112,21 +129,21 @@ export class NoteActionService {
 			try {
 				if (!owns())
 					throw new Conflict("The originating conversation changed");
+				let file: TFile;
 				if (frozen.before === null) {
 					if (this.vault.getAbstractFileByPath(frozen.path))
 						throw new Conflict("The new note already exists");
-					await this.vault.create(frozen.path, frozen.after);
+					file = await this.vault.create(frozen.path, frozen.after);
 				} else
-					await this.replace(
+					file = await this.replace(
 						frozen.path,
 						frozen.before,
 						frozen.after,
 						owns,
 					);
-				status =
-					(await this.read(frozen.path)) === frozen.after
-						? "verified"
-						: "unknown";
+				status = (await this.verified(file, frozen.path, frozen.after))
+					? "verified"
+					: "unknown";
 			} catch (error) {
 				status = error instanceof Conflict ? "conflict" : "unknown";
 			}
@@ -182,24 +199,30 @@ export class NoteActionService {
 			if (proposal.before === null)
 				throw new Error("Created notes must be removed manually");
 			await this.storage.assertNoUnresolvedWrite(proposal.path);
-			if (!owns())
-				throw new Conflict("The originating conversation changed");
+			if (!owns()) return receipt;
 			await this.record(sessionId, proposal, "undo-pending");
 			let status: WriteReceipt["status"];
 			try {
-				await this.replace(
+				const file = await this.replace(
 					proposal.path,
 					proposal.after,
 					proposal.before,
 					owns,
 				);
-				status =
-					(await this.read(proposal.path)) === proposal.before
-						? "undone"
-						: "undo-pending";
+				status = (await this.verified(
+					file,
+					proposal.path,
+					proposal.before,
+				))
+					? "undone"
+					: "undo-pending";
 			} catch (error) {
 				status =
-					error instanceof Conflict ? "conflict" : "undo-pending";
+					error instanceof OwnerCancelled
+						? "verified"
+						: error instanceof Conflict
+							? "conflict"
+							: "undo-pending";
 			}
 			return this.record(sessionId, proposal, status);
 		});

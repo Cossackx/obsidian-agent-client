@@ -215,6 +215,10 @@ export interface InputAreaProps {
 	/** Composer context row; replaces the legacy auto-mention badge. */
 	contextRow?: React.ReactNode;
 	onStageNotes: (paths: string[]) => Promise<void>;
+	onStageAttachments: (
+		work: (stageNotes: InputAreaProps["onStageNotes"]) => Promise<void>,
+	) => Promise<void>;
+	composerTextarea: React.RefObject<HTMLTextAreaElement>;
 	/** Input suggestions (mentions + slash commands) */
 	suggestions: UseSuggestionsReturn;
 	/** Plugin instance */
@@ -250,7 +254,9 @@ export interface InputAreaProps {
 	/** Currently attached files (images and non-image files) */
 	attachedFiles: AttachedFile[];
 	/** Callback when attached files change */
-	onAttachedFilesChange: (files: AttachedFile[]) => void;
+	onAttachedFilesChange: (
+		files: React.SetStateAction<AttachedFile[]>,
+	) => void;
 	/** Error information to display as overlay */
 	errorInfo: ErrorInfo | null;
 	/** Callback to clear the error */
@@ -290,7 +296,8 @@ export function InputArea({
 	onApprovePermission,
 	autoMentionEnabled,
 	contextRow,
-	onStageNotes,
+	onStageAttachments,
+	composerTextarea: textareaRef,
 	suggestions,
 	plugin,
 	view,
@@ -341,7 +348,7 @@ export function InputArea({
 	);
 
 	// Refs
-	const textareaRef = useRef<HTMLTextAreaElement>(null);
+
 	const dragCounterRef = useRef(0);
 
 	/**
@@ -351,22 +358,30 @@ export function InputArea({
 	const addAttachments = useCallback(
 		(newFiles: AttachedFile[]) => {
 			if (newFiles.length === 0) return;
-			const remaining = MAX_ATTACHMENT_COUNT - attachedFiles.length;
-			if (remaining <= 0) {
-				new Notice(
-					`[Agent Client] Maximum ${MAX_ATTACHMENT_COUNT} attachments allowed`,
+			onAttachedFilesChange((current) => {
+				const remaining = Math.max(
+					0,
+					MAX_ATTACHMENT_COUNT - current.length,
 				);
-				return;
-			}
-			const toAdd = newFiles.slice(0, remaining);
-			if (toAdd.length < newFiles.length) {
-				new Notice(
-					`[Agent Client] Maximum ${MAX_ATTACHMENT_COUNT} attachments allowed`,
-				);
-			}
-			onAttachedFilesChange([...attachedFiles, ...toAdd]);
+				if (newFiles.length > remaining)
+					new Notice(
+						`[Agent Client] Maximum ${MAX_ATTACHMENT_COUNT} attachments allowed`,
+					);
+				return [...current, ...newFiles.slice(0, remaining)];
+			});
 		},
-		[attachedFiles, onAttachedFilesChange],
+		[onAttachedFilesChange],
+	);
+	const stageAttachments = useCallback(
+		(work: Parameters<InputAreaProps["onStageAttachments"]>[0]) =>
+			onStageAttachments(work).catch((error: unknown) => {
+				new Notice(
+					error instanceof Error
+						? error.message
+						: "Could not stage attachments.",
+				);
+			}),
+		[onStageAttachments],
 	);
 
 	/**
@@ -374,10 +389,12 @@ export function InputArea({
 	 */
 	const removeFile = useCallback(
 		(id: string) => {
-			onAttachedFilesChange(attachedFiles.filter((f) => f.id !== id));
+			onAttachedFilesChange((current) =>
+				current.filter((f) => f.id !== id),
+			);
 			textareaRef.current?.focus();
 		},
-		[attachedFiles, onAttachedFilesChange],
+		[onAttachedFilesChange, textareaRef],
 	);
 
 	/**
@@ -494,40 +511,42 @@ export function InputArea({
 			if (imageFiles.length === 0 && nonImageFiles.length === 0) return;
 
 			e.preventDefault();
+			await stageAttachments(async () => {
+				const newAttachments: AttachedFile[] = [];
 
-			const newAttachments: AttachedFile[] = [];
-
-			if (imageFiles.length > 0) {
-				if (supportsImages) {
-					newAttachments.push(
-						...(await convertImagesToAttachments(imageFiles)),
-					);
-				} else {
-					// Try resource_link fallback (works for files copied from Finder, not for screenshots)
-					const converted = convertFilesToAttachments(imageFiles);
-					if (converted.length > 0) {
-						newAttachments.push(...converted);
-					} else {
-						new Notice(
-							"[Agent Client] This agent does not support image paste. Try drag & drop instead.",
+				if (imageFiles.length > 0) {
+					if (supportsImages) {
+						newAttachments.push(
+							...(await convertImagesToAttachments(imageFiles)),
 						);
+					} else {
+						// Try resource_link fallback (works for files copied from Finder, not for screenshots)
+						const converted = convertFilesToAttachments(imageFiles);
+						if (converted.length > 0) {
+							newAttachments.push(...converted);
+						} else {
+							new Notice(
+								"[Agent Client] This agent does not support image paste. Try drag & drop instead.",
+							);
+						}
 					}
 				}
-			}
 
-			if (nonImageFiles.length > 0) {
-				newAttachments.push(
-					...convertFilesToAttachments(nonImageFiles),
-				);
-			}
+				if (nonImageFiles.length > 0) {
+					newAttachments.push(
+						...convertFilesToAttachments(nonImageFiles),
+					);
+				}
 
-			addAttachments(newAttachments);
+				addAttachments(newAttachments);
+			});
 		},
 		[
 			supportsImages,
 			convertImagesToAttachments,
 			convertFilesToAttachments,
 			addAttachments,
+			stageAttachments,
 		],
 	);
 
@@ -691,12 +710,14 @@ export function InputArea({
 				// inserting the URL and Obsidian's own leaf drop handling.
 				e.preventDefault();
 
-				await routeVaultDrop(vaultDrag, {
-					stage: onStageNotes,
-					convert: convertVaultFilesToAttachments,
-					attach: addAttachments,
-					notice: (message) => new Notice(message),
-				});
+				await stageAttachments((stage) =>
+					routeVaultDrop(vaultDrag, {
+						stage,
+						convert: convertVaultFilesToAttachments,
+						attach: addAttachments,
+						notice: (message) => new Notice(message),
+					}),
+				);
 				return;
 			}
 
@@ -719,27 +740,29 @@ export function InputArea({
 			}
 
 			// Convert all files, then update state once
-			const newAttachments: AttachedFile[] = [];
+			await stageAttachments(async () => {
+				const newAttachments: AttachedFile[] = [];
 
-			if (imageFiles.length > 0) {
-				if (supportsImages) {
+				if (imageFiles.length > 0) {
+					if (supportsImages) {
+						newAttachments.push(
+							...(await convertImagesToAttachments(imageFiles)),
+						);
+					} else {
+						newAttachments.push(
+							...convertFilesToAttachments(imageFiles),
+						);
+					}
+				}
+
+				if (nonImageFiles.length > 0) {
 					newAttachments.push(
-						...(await convertImagesToAttachments(imageFiles)),
-					);
-				} else {
-					newAttachments.push(
-						...convertFilesToAttachments(imageFiles),
+						...convertFilesToAttachments(nonImageFiles),
 					);
 				}
-			}
 
-			if (nonImageFiles.length > 0) {
-				newAttachments.push(
-					...convertFilesToAttachments(nonImageFiles),
-				);
-			}
-
-			addAttachments(newAttachments);
+				addAttachments(newAttachments);
+			});
 		},
 		[
 			plugin,
@@ -747,7 +770,7 @@ export function InputArea({
 			convertImagesToAttachments,
 			convertFilesToAttachments,
 			convertVaultFilesToAttachments,
-			onStageNotes,
+			stageAttachments,
 			addAttachments,
 		],
 	);

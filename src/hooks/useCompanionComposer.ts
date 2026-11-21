@@ -13,8 +13,10 @@ export function useCompanionComposer(sessionId: string | null) {
 		leaseRef.current = { id: sessionId, binding: {} };
 	const lease = leaseRef.current;
 	const ownsComposer = () => mounted.current && leaseRef.current === lease;
+	const [, publishLease] = useState(0);
 	const invalidate = useCallback(() => {
 		leaseRef.current = { ...leaseRef.current };
+		publishLease((n) => n + 1);
 	}, []);
 	useLayoutEffect(() => {
 		mounted.current = true;
@@ -31,6 +33,7 @@ export function useCompanionComposer(sessionId: string | null) {
 		owner: object;
 		files: AttachedFile[];
 	} | null>(null);
+	const currentFiles = useRef(staged);
 	const restore = (text: string) => {
 		if (!mounted.current || leaseRef.current.binding !== lease.binding)
 			return;
@@ -53,13 +56,16 @@ export function useCompanionComposer(sessionId: string | null) {
 	function changeFiles(change: SetStateAction<AttachedFile[]>) {
 		if (!ownsComposer() || !sessionId) return;
 		revision.current++;
-		setStaged((old) => ({
+		const old = currentFiles.current;
+		const next = {
 			owner: lease.binding,
 			files:
 				typeof change === "function"
 					? change(old?.owner === lease.binding ? old.files : [])
 					: change,
-		}));
+		};
+		currentFiles.current = next;
+		setStaged(next);
 	}
 	async function send(operation: () => Promise<boolean>) {
 		if (!ownsComposer()) return false;

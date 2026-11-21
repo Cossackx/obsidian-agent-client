@@ -117,10 +117,15 @@ export function ComposerContext({
 					</span>
 					{detail.kind === "following" && (
 						<small>
-							Sent with each turn while this note is active,
-							within the note-length limit. Removing it keeps it
-							off for this conversation.
+							{detail.followSelection
+								? "Includes the selected text, not the rest of the note. Unverified or truncated text requires review."
+								: "Includes the active note’s path, not its contents. Pin to capture the whole note."}{" "}
+							Removing it turns off following for this
+							conversation.
 						</small>
+					)}
+					{detail.annotation && (
+						<small>Source annotation: {detail.annotation}</small>
 					)}
 					{detail.selectionEdit && (
 						<small>

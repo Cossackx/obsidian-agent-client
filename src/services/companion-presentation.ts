@@ -34,6 +34,8 @@ export interface ComposerChip {
 	itemId?: string;
 	pinned: boolean;
 	selectionEdit?: true;
+	followSelection?: boolean;
+	annotation?: string;
 	status?: string;
 }
 
@@ -58,6 +60,7 @@ export function composerChips(input: {
 			pinned: item.lifetime === "session",
 			...(item.selectionEdit && { selectionEdit: item.selectionEdit }),
 			status: item.status,
+			annotation: item.annotation,
 			scope:
 				item.scope.kind === "note"
 					? `whole note · ${item.role}`
@@ -75,9 +78,10 @@ export function composerChips(input: {
 			kind: "following",
 			path: input.activePath,
 			pinned: false,
+			followSelection: !!input.activeSelection,
 			scope: input.activeSelection
-				? `following · lines ${input.activeSelection.fromLine}-${input.activeSelection.toLine}`
-				: "following active note",
+				? `following · selected lines ${input.activeSelection.fromLine}-${input.activeSelection.toLine}`
+				: "following active note · path only",
 		});
 	return { chips, following };
 }
