@@ -15,7 +15,10 @@ import {
 
 import type { AttachedFile, ChatInputState, ChatMessage } from "../types/chat";
 import type { TranscriptSnapshot } from "../hooks/useAgentMessages";
-import type { NoteMetadata } from "../services/vault-service";
+import {
+	CONTEXT_ONLY_NOTICE,
+	type NoteMetadata,
+} from "../services/vault-service";
 import { isSameDirectory } from "../utils/platform";
 import {
 	computeSessionTitle,
@@ -2714,12 +2717,12 @@ export const ChatPanel = React.memo(function ChatPanel({
 			const captured = selection
 				? await vaultService.captureActiveSelection()
 				: null;
-			// Write authority only for the very file the displayed selection came from.
+			// A followed selection is context only; authority comes from this fresh capture.
 			const shown = selection?.file;
 			if (
 				selection &&
 				(!captured ||
-					(shown && captured.file !== shown) ||
+					(shown && captured.file && captured.file !== shown) ||
 					captured.path !== chip.path ||
 					!selection.range ||
 					captured.range.start !== selection.range.start ||
@@ -2739,14 +2742,15 @@ export const ChatPanel = React.memo(function ChatPanel({
 				text: await vaultService.readNote(chip.path),
 				capturedAt: Date.now(),
 			};
-			// No displayed identity: frozen context only, never an edit target.
+			// Without affirmative capture evidence: frozen context, never an edit target.
+			const owned = captured?.file;
 			if (
-				shown &&
-				captured?.file === shown &&
-				shown.path === captured.path &&
-				plugin.app.vault.getAbstractFileByPath(captured.path) === shown
+				owned &&
+				owned.path === captured.path &&
+				plugin.app.vault.getAbstractFileByPath(captured.path) === owned
 			)
-				selectionWitnesses.current.set(itemId, shown);
+				selectionWitnesses.current.set(itemId, owned);
+			else if (captured) new Notice(CONTEXT_ONLY_NOTICE);
 			await guardedUpdate(
 				(old) =>
 					putItem(old, {

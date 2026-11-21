@@ -1,5 +1,6 @@
 import { MarkdownView } from "obsidian";
 import { describeScope } from "../services/source-comparison";
+import { CONTEXT_ONLY_NOTICE } from "../services/vault-service";
 import * as React from "react";
 import { Modal, Notice, TFile, type App } from "obsidian";
 import type {
@@ -374,6 +375,7 @@ export function ContextTray({
 			// Keep durable state plain; the live identity goes to witnesses.
 			const { file, ...source } = capture;
 			if (file) witnesses.set(id, file);
+			else new Notice(CONTEXT_ONLY_NOTICE);
 			item = {
 				id,
 				source,

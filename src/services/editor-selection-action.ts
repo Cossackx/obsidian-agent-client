@@ -90,7 +90,16 @@ export async function stageEditorSelection(
 		checkSource();
 	};
 	check();
-	await owner.stage(source, range, purpose, check, ...(file ? [file] : []));
+	// Edit authority is decided by the caller's evidence, re-checked after it.
+	const target: unknown = await file;
+	check();
+	await owner.stage(
+		source,
+		range,
+		purpose,
+		check,
+		...(target ? [target] : []),
+	);
 }
 
 const editSeed = "Suggest a revision to the selected passage.";

@@ -14,10 +14,10 @@ import {
 	type EventRef,
 } from "obsidian";
 import { EditorView, type ViewUpdate } from "@codemirror/view";
-import { Compartment, StateEffect, StateField } from "@codemirror/state";
+import { StateEffect, Transaction, type EditorState } from "@codemirror/state";
 import { getLogger, Logger } from "../utils/logger";
 import type { SourceSnapshot, TextRange } from "../types/note-companion";
-import { extractSelection } from "../utils/selection";
+import { extractSelection, normalizeLineEndings } from "../utils/selection";
 import {
 	getNoteWikiLinks,
 	type IWikilinkResolver,
@@ -25,12 +25,89 @@ import {
 	type LineRange,
 } from "../utils/wikilink-resolver";
 
-/** Owner of a CM document lineage: set when a load commits into it, never re-read from the view. */
-type DocOwner = { file: TFile | null };
-const docOwner = StateField.define<DocOwner>({
-	create: () => ({ file: null }),
-	update: (owner) => owner,
-});
+/**
+ * A document generation: a token whose identity is its object. Its file is
+ * bound at most once, and only on affirmative evidence; it is never reassigned.
+ */
+type Generation = { file: TFile | null };
+/** Shared by every VaultService: one record per EditorState and per editor view. */
+const generations = new WeakMap<EditorState, Generation>();
+const viewGenerations = new WeakMap<object, Generation>();
+/** The state each editor showed at the last workspace notification. */
+const lastSeen = new WeakMap<object, EditorState>();
+const trackers = new Set<
+	(update: ViewUpdate, generation: Generation) => void
+>();
+
+/**
+ * The one selection listener, registered once by the plugin so every
+ * EditorState carries it from creation. It decides each transaction's
+ * generation once, before any panel sees it. A generation continues only
+ * through a document-preserving transaction of the state its view last
+ * showed; the user's own edit keeps the binding in a new token; any other
+ * document change, an unseen state or a state swap mints an unbound token.
+ * A retired generation can therefore never come back.
+ */
+const trackUpdate = (update: ViewUpdate): void => {
+	const previous = generations.get(update.startState);
+	const continues =
+		!!previous && viewGenerations.get(update.view) === previous;
+	const userEdit = update.transactions.some(
+		(tr) => tr.annotation(Transaction.userEvent) !== undefined,
+	);
+	const generation =
+		continues && !update.docChanged
+			? previous
+			: { file: continues && userEdit ? previous.file : null };
+	generations.set(update.state, generation);
+	viewGenerations.set(update.view, generation);
+	for (const tracker of trackers) tracker(update, generation);
+};
+/** Registered once by the plugin (registerEditorExtension). */
+export const selectionTracking = EditorView.updateListener.of(trackUpdate);
+
+/** The generation the editor shows now; a reinstalled old state gets a new token. */
+function currentGeneration(cm: EditorView): Generation {
+	const known = generations.get(cm.state);
+	if (known && viewGenerations.get(cm) === known) return known;
+	const generation: Generation = { file: null };
+	generations.set(cm.state, generation);
+	viewGenerations.set(cm, generation);
+	return generation;
+}
+
+/**
+ * Edit authority for an explicit capture (rule C, evidence ii): the editor's
+ * whole current document equals the named file's current vault content and
+ * the file is still the live object at its path. Line endings are normalised
+ * because the editor holds LF. Residual: two distinct files with
+ * byte-identical content during a load window are indistinguishable.
+ */
+export async function documentIsFile(
+	plugin: AgentClientPlugin,
+	document: () => string,
+	file: TFile,
+): Promise<boolean> {
+	const vault = plugin.app.vault;
+	const live = () => vault.getAbstractFileByPath(file.path) === file;
+	if (!live()) return false;
+	const before = document();
+	let saved: string;
+	try {
+		saved = await vault.read(file);
+	} catch {
+		return false;
+	}
+	return (
+		live() &&
+		document() === before &&
+		normalizeLineEndings(before) === normalizeLineEndings(saved)
+	);
+}
+
+/** Message for an explicit capture that stays frozen context only. */
+export const CONTEXT_ONLY_NOTICE =
+	"Added as context only: the note is still loading or has unsaved changes. Try again in a moment to enable editing.";
 
 // ============================================================================
 // Port Types (from vault-access.port.ts)
@@ -162,15 +239,15 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 		file?: TFile;
 		selection: NonNullable<NoteMetadata["selection"]>;
 		snapshot?: SourceSnapshot & { range: TextRange };
-		/** Emitting editor and its document owner; the witness dies with that binding. */
+		/** Emitting editor and its document generation; the witness dies with it. */
 		cm: EditorView;
-		owner: DocOwner;
+		generation: Generation;
 	} | null = null;
 	private selectionListeners = new Set<() => void>();
 	private activeLeafRef: EventRef | null = null;
 	private fileOpenRef: EventRef | null = null;
-	private detachEditorListenerFn: (() => void) | null = null;
-	private selectionCompartment: Compartment | null = null;
+	private tracker = (update: ViewUpdate, generation: Generation) =>
+		this.onEditorUpdate(update, generation);
 	private lastSelectionKey = "";
 
 	constructor(private plugin: AgentClientPlugin) {
@@ -369,14 +446,18 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 		if (view?.file && view.getMode() === "source") {
 			const file = view.file;
 			const path = file.path;
-			// Refuse while the editor document still belongs to another file (load in progress).
-			const owner = (
-				view.editor as unknown as { cm?: EditorView }
-			).cm?.state.field(docOwner, false);
-			if (owner && owner.file !== file) return null;
 			const selection = view.editor.listSelections()[0];
 			if (!selection) return null;
 			const text = view.editor.getValue();
+			// Edit authority only with affirmative evidence; otherwise frozen context.
+			const owned =
+				(await documentIsFile(
+					this.plugin,
+					() => view.editor.getValue(),
+					file,
+				)) &&
+				view.file === file &&
+				view.editor.getValue() === text;
 			const { range } = extractSelection(
 				text,
 				selection.anchor,
@@ -384,7 +465,9 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 			);
 			// Non-enumerable: spreads, JSON and structuredClone never persist it.
 			const live = (capture: SourceSnapshot & { range: TextRange }) =>
-				Object.defineProperty(capture, "file", { value: file });
+				owned
+					? Object.defineProperty(capture, "file", { value: file })
+					: capture;
 			return allowCaret || range.start < range.end
 				? live({
 						path,
@@ -404,7 +487,7 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 		if (allowCaret) return null;
 		const note = await this.getActiveNote();
 		const cached = this.currentSelection;
-		// Only the file that produced the cached selection, still at its path.
+		// A followed selection is context only: frozen, never edit authority.
 		return note &&
 			cached?.snapshot &&
 			this.witnessLive() &&
@@ -413,9 +496,7 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 			file === cached.file &&
 			this.plugin.app.vault.getAbstractFileByPath(cached.filePath) ===
 				cached.file
-			? Object.defineProperty({ ...cached.snapshot }, "file", {
-					value: cached.file,
-				})
+			? { ...cached.snapshot }
 			: null;
 	}
 
@@ -470,23 +551,19 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 		}
 
 		const workspace = this.plugin.app.workspace;
-		this.attachToView(workspace.getActiveViewOfType(MarkdownView) ?? null);
-
-		this.activeLeafRef = workspace.on("active-leaf-change", (leaf) => {
-			const nextView =
-				leaf?.view instanceof MarkdownView
-					? leaf.view
-					: workspace.getActiveViewOfType(MarkdownView);
-			this.attachToView(nextView ?? null);
-		});
-		// A reused leaf can load a new file (and a new CM state) without a leaf change.
+		trackers.add(this.tracker);
+		this.onWorkspaceChange();
+		// Workspace signals only re-query; they never capture or bind.
+		this.activeLeafRef = workspace.on("active-leaf-change", () =>
+			this.onWorkspaceChange(),
+		);
 		this.fileOpenRef = workspace.on("file-open", () =>
-			this.attachToView(workspace.getActiveViewOfType(MarkdownView)),
+			this.onWorkspaceChange(),
 		);
 	}
 
 	private teardownSelectionTracking(): void {
-		this.detachEditorListener();
+		trackers.delete(this.tracker);
 		for (const ref of [this.activeLeafRef, this.fileOpenRef]) {
 			if (ref) this.plugin.app.workspace.offref(ref);
 		}
@@ -495,119 +572,107 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 		this.lastSelectionKey = "";
 	}
 
-	private detachEditorListener(): void {
-		if (this.detachEditorListenerFn) {
-			this.detachEditorListenerFn();
-			this.detachEditorListenerFn = null;
-		}
-		this.selectionCompartment = null;
-	}
-
-	/** The witness survives only while its document lineage keeps the owner it was taken under. */
+	/** The witness survives only while its editor still shows its generation. */
 	private witnessLive(): boolean {
 		const witness = this.currentSelection;
 		if (
 			witness &&
-			witness.cm.state.field(docOwner, false) === witness.owner &&
-			witness.owner.file === witness.file
+			generations.get(witness.cm.state) === witness.generation &&
+			viewGenerations.get(witness.cm) === witness.generation
 		) {
-			return true;
+			// Unbound (still loading) shows nothing but may be bound later.
+			return witness.generation.file === witness.file;
 		}
 		this.currentSelection = null;
 		return false;
 	}
 
-	/**
-	 * Attaching (focus, leaf change, file-open) only installs the listener and,
-	 * for a document lineage not seen before, records its owner. It never
-	 * captures: only a selection transaction on an owned document does.
-	 */
-	private attachToView(view: MarkdownView | null): void {
-		this.detachEditorListener();
+	private onWorkspaceChange(): void {
 		this.lastSelectionKey = "none";
-
-		// Access CodeMirror 6 instance from Obsidian's Editor
-		// WARNING: This uses Obsidian's internal API (editor.cm) which is not documented
-		// and may change or be removed in future versions.
-		// This is required for real-time selection change tracking via EditorView.updateListener.
-		// If this API becomes unavailable, selection tracking will silently fail.
-		const cm = view?.file
-			? (view.editor as unknown as { cm?: EditorView }).cm
-			: undefined;
-		if (!view?.file || !cm?.state) {
-			if (view?.file) {
-				getLogger().debug(
-					"[VaultService] CodeMirror 6 API not available. " +
-						"Selection change tracking will not work. " +
-						"This may be due to an Obsidian version change.",
-				);
+		const view =
+			this.plugin.app.workspace.getActiveViewOfType(MarkdownView);
+		// WARNING: editor.cm is Obsidian's undocumented CodeMirror 6 handle.
+		const cm = (view?.editor as unknown as { cm?: EditorView } | undefined)
+			?.cm;
+		const file = view?.file;
+		if (view && file && cm?.state) {
+			const state = cm.state;
+			// Evidence (i): a new state installed since this editor was last seen.
+			const fresh = lastSeen.has(cm) && lastSeen.get(cm) !== state;
+			lastSeen.set(cm, state);
+			// The plugin registers the listener for every new state; a state that
+			// predates it gets the same shared extension.
+			if (!state.facet(EditorView.updateListener).includes(trackUpdate))
+				cm.dispatch({
+					effects: StateEffect.appendConfig.of(selectionTracking),
+				});
+			lastSeen.set(cm, cm.state);
+			const generation = currentGeneration(cm);
+			if (generation.file === null) {
+				if (fresh) this.bind(view, cm, generation, file, true);
+				// Evidence (ii) for an editor first seen now (cold start).
+				else
+					void documentIsFile(
+						this.plugin,
+						() => cm.state.doc.toString(),
+						file,
+					).then((owned) => {
+						if (owned && currentGeneration(cm) === generation)
+							this.bind(view, cm, generation, file, false);
+					});
 			}
-			// The stored selection is kept for the chat panel; listeners re-query.
-			this.notifySelectionListeners();
-			return;
 		}
-
-		const loaded = view.file;
-		const compartment = new Compartment();
-		this.selectionCompartment = compartment;
-		cm.dispatch({
-			effects: StateEffect.appendConfig.of([
-				// A state without an owner is a committed load into this editor.
-				cm.state.field(docOwner, false)
-					? []
-					: docOwner.init(() => ({ file: loaded })),
-				compartment.of(
-					EditorView.updateListener.of((update) =>
-						this.onEditorUpdate(view, update),
-					),
-				),
-			]),
-		});
-		this.detachEditorListenerFn = () => {
-			cm.dispatch({ effects: compartment.reconfigure([]) });
-		};
 		this.notifySelectionListeners();
 	}
 
-	private onEditorUpdate(view: MarkdownView, update: ViewUpdate): void {
+	/**
+	 * Binds an unbound generation once. A load commit (i) also shows the range
+	 * made in that state; a cold match (ii) shows only later selections.
+	 */
+	private bind(
+		view: MarkdownView,
+		cm: EditorView,
+		generation: Generation,
+		file: TFile,
+		showExisting: boolean,
+	): void {
+		if (generation.file !== null || view.file !== file) return;
+		generation.file = file;
+		if (showExisting) this.showSelection(view, cm, generation);
+	}
+
+	private onEditorUpdate(update: ViewUpdate, generation: Generation): void {
 		if (!update.selectionSet && !update.docChanged) return;
-		const owner = update.state.field(docOwner, false);
+		const view =
+			this.plugin.app.workspace.getActiveViewOfType(MarkdownView);
+		const editor = view?.editor as unknown as
+			| { cm?: EditorView }
+			| undefined;
+		if (!view?.file || editor?.cm !== update.view) return;
+		this.showSelection(view, update.view, generation);
+	}
+
+	/** Witness only a selection on a generation bound to the view's file. */
+	private showSelection(
+		view: MarkdownView,
+		cm: EditorView,
+		generation: Generation,
+	): void {
 		const file = view.file;
-		if (!owner) return;
-		if (owner.file !== file) {
-			// A whole-document replacement after the view's file changed commits the load.
-			const replaced = update.transactions.some((tr) => {
-				let whole = false;
-				tr.changes.iterChangedRanges((from, to) => {
-					whole ||= from === 0 && to === tr.startState.doc.length;
-				});
-				return whole;
-			});
-			if (update.docChanged && replaced) {
-				owner.file = file;
-				this.notifySelectionListeners();
-			}
-			// Otherwise the document still belongs to another file: refuse.
-			return;
-		}
-		const editor = view.editor as unknown as {
-			cm?: EditorView;
-			hasFocus(): boolean;
-		};
-		if (!file || editor.cm !== update.view) return;
-		// A doc change alone may update this document's witness, never create one.
-		if (!update.selectionSet && this.currentSelection?.owner !== owner) {
-			return;
-		}
+		if (!file) return;
 		const filePath = file.path;
-		if (view.getMode() !== "source") {
-			this.handleSelectionChange(filePath, null);
-			return;
-		}
-		const { doc, selection } = update.state;
+		const { doc, selection } = cm.state;
 		const { from, to } = selection.main;
-		if (from === to) {
-			if (editor.hasFocus()) this.handleSelectionChange(filePath, null);
+		if (
+			generation.file !== file ||
+			view.getMode() !== "source" ||
+			from === to
+		) {
+			const focused = (
+				view.editor as unknown as { hasFocus(): boolean }
+			).hasFocus();
+			if (generation.file !== file || from !== to || focused)
+				this.handleSelectionChange(filePath, null);
 			return;
 		}
 		const at = (pos: number): EditorPosition => {
@@ -619,8 +684,8 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 			{ from: at(from), to: at(to) },
 			doc.toString(),
 			file,
-			update.view,
-			owner,
+			cm,
+			generation,
 		);
 	}
 
@@ -630,7 +695,7 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 		buffer?: string,
 		file?: TFile,
 		cm?: EditorView,
-		owner?: DocOwner,
+		generation?: Generation,
 	): void {
 		const selectionKey = filePath
 			? selection
@@ -649,7 +714,7 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 
 		this.lastSelectionKey = selectionKey;
 
-		if (filePath && selection && cm && owner) {
+		if (filePath && selection && cm && generation) {
 			const excerpt =
 				buffer === undefined
 					? undefined
@@ -658,7 +723,7 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 				filePath,
 				file,
 				cm,
-				owner,
+				generation,
 				selection: { ...selection, ...excerpt },
 				snapshot:
 					buffer !== undefined && excerpt

@@ -706,6 +706,8 @@ it.each([
 	});
 	Object.assign(h.plugin.app.vault, {
 		getAbstractFileByPath: () => view.file,
+		// Fixture input: the saved note equals the editor buffer (settled note).
+		read: async () => buffer,
 	});
 	// Real capture method over the fixture plugin (VaultService only reads this.plugin).
 	const service = Object.create(VaultService.prototype, {
@@ -1484,6 +1486,10 @@ it.each(["selection on B", "A returns before send"])(
 				},
 			}),
 		);
+		// Rule C: the host's file-open after the load is the binding evidence.
+		await act(async () =>
+			(h.events.get("file-open") as (file: TFile) => void)(a.other),
+		);
 		const listeners = editor.cm.state.facet(EditorView.updateListener);
 		expect(listeners).toHaveLength(1);
 		await editor.select(4, 8);
@@ -1605,6 +1611,12 @@ it.each([
 						},
 					}),
 				);
+				// Rule C: binding needs the host's file-open after the load.
+				await act(async () =>
+					(h.events.get("file-open") as (file: TFile) => void)(
+						a.other,
+					),
+				);
 			}
 			await editorA.select(4, 8);
 			off();
@@ -1613,8 +1625,10 @@ it.each([
 				expect(shown()?.text).toBe("BODY");
 			} else {
 				expect(shown()?.file).not.toBe(a.other);
-				// Explicit capture refuses too while the document belongs to A.
-				expect(await svc.captureActiveSelection()).toBeNull();
+				// Explicit capture is frozen context only while the document belongs to A.
+				const capture = await svc.captureActiveSelection();
+				expect(capture?.text).toBe("HEADBODY-A");
+				expect(capture?.file).toBeUndefined();
 			}
 			return;
 		}
@@ -1631,3 +1645,126 @@ it.each([
 		expect(shown()?.text).toBe("BODY");
 	},
 );
+
+it.each([
+	"F1 unseen editor showing A while the leaf names B",
+	"F1 control: settled note",
+	"F3 two services, A to B to A",
+	"F4 fresh state selected before the queued file-open",
+	"B one listener for two services",
+])("Convergence: identity needs affirmative evidence: %s", async (mode) => {
+	const h = await mount({ follow: true });
+	const a = attachVault(h);
+	a.data.set(a.original, "HEADBODY-A");
+	a.data.set(a.other, "DIFFBODY-B");
+	const view = openSourceEditor(h, a);
+	const active = true;
+	const live = () => (view.editor as { cm: EditorView }).cm.state;
+	Object.assign(view.editor, {
+		somethingSelected: () => true,
+		hasFocus: () => active,
+		getValue: () => live().doc.toString(),
+		listSelections: () => [
+			{
+				anchor: { line: 0, ch: live().selection.main.anchor },
+				head: { line: 0, ch: live().selection.main.head },
+			},
+		],
+	});
+	Object.assign(a.v, {
+		on: () => ({}),
+		getMarkdownFiles: () => [view.file],
+		getAbstractFileByPath: () => view.file,
+	});
+	Object.assign(h.plugin.app, {
+		metadataCache: { getFileCache: () => ({}) },
+	});
+	Object.assign(h.plugin.app.workspace, {
+		getActiveViewOfType: () => (active ? view : null),
+	});
+	// Real tracker; the fixture plugin is the same shape the harness passes elsewhere.
+	const svc = new VaultService(h.plugin as never);
+	Object.assign(h.vaultAccess, {
+		getActiveNote: () => svc.getActiveNote(),
+		captureActiveSelection: (caret?: boolean) =>
+			svc.captureActiveSelection(caret),
+	});
+	const editorA = trackEditor(view, a.data.get(a.original)!);
+	const refresh = () => h.input.suggestions.mentions.updateActiveNote();
+	let off = noop;
+	await act(async () => {
+		off = svc.subscribeSelectionChanges(() => void refresh());
+	});
+	const shown = () => h.input.suggestions.mentions.activeNote?.selection;
+	if (mode.startsWith("F1")) {
+		// A fresh editor nobody has observed: no field is not a load.
+		const editorB = trackEditor(view, a.data.get(a.original)!, 0, 4);
+		if (mode.includes("control")) {
+			const capture = await svc.captureActiveSelection();
+			off();
+			expect(capture?.file).toBe(a.original);
+			return;
+		}
+		view.file = a.other;
+		const capture = await svc.captureActiveSelection();
+		off();
+		expect(editorB.cm.state.doc.toString()).toBe("HEADBODY-A");
+		expect(capture?.text).toBe("HEADBODY-A");
+		expect(capture?.file).toBeUndefined();
+		return;
+	}
+	if (mode.startsWith("F3") || mode.startsWith("B")) {
+		const svc2 = new VaultService(h.plugin as never);
+		let off2 = noop;
+		await act(async () => {
+			off2 = svc2.subscribeSelectionChanges(noop);
+		});
+		await editorA.select(0, 4);
+		if (mode.startsWith("B")) {
+			const count = editorA.cm.state.facet(
+				EditorView.updateListener,
+			).length;
+			off();
+			off2();
+			expect(count).toBe(1);
+			return;
+		}
+		expect((await svc2.getActiveNote())?.selection?.file).toBe(a.original);
+		for (const [file, text] of [
+			[a.other, "BETABODY-B"],
+			[a.original, "NEWABODY-A"],
+		] as const) {
+			view.file = file;
+			await act(async () =>
+				editorA.cm.dispatch({
+					changes: {
+						from: 0,
+						to: editorA.cm.state.doc.length,
+						insert: text,
+					},
+				}),
+			);
+		}
+		const first = (await svc.getActiveNote())?.selection;
+		const second = (await svc2.getActiveNote())?.selection;
+		off();
+		off2();
+		expect(first).toBeUndefined();
+		expect(second).toBeUndefined();
+		return;
+	}
+	if (mode.startsWith("F4")) {
+		await editorA.select(0, 4);
+		view.file = a.other;
+		editorA.reset(a.data.get(a.other)!);
+		await editorA.select(4, 8);
+		await act(async () =>
+			(h.events.get("file-open") as (file: TFile) => void)(a.other),
+		);
+		await act(async () => refresh());
+		off();
+		expect(shown()?.file).toBe(a.other);
+		expect(shown()?.text).toBe("BODY");
+		return;
+	}
+});

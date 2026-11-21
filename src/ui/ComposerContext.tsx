@@ -118,7 +118,7 @@ export function ComposerContext({
 					{detail.kind === "following" && (
 						<small>
 							{detail.followSelection
-								? "Includes the selected text, not the rest of the note. Unverified or truncated text requires review."
+								? "Includes the selected text as context, not the rest of the note. Following never enables editing: use Pin, Add selection or Suggest edit to selection. Unverified or truncated text requires review."
 								: "Includes the active note’s path, not its contents. Pin to capture the whole note."}{" "}
 							Removing it turns off following for this
 							conversation.
