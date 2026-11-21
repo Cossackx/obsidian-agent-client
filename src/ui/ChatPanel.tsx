@@ -53,6 +53,7 @@ import {
 	type ComposerChip,
 } from "../services/companion-presentation";
 import { putItem, refreshItem } from "../services/companion-state";
+import { noteDropPaths, stageDroppedNotes } from "../services/stage-note-drop";
 import {
 	CompanionMutationGate,
 	guardCompanionChange,
@@ -2396,6 +2397,54 @@ export const ChatPanel = React.memo(function ChatPanel({
 						: "Context did not change",
 				),
 		);
+	const stageNotes = (paths: string[]) =>
+		runMutation(async () => {
+			const snapshot = companion.state;
+			if (!snapshot)
+				throw new Error(
+					"Wait for the conversation to load before adding notes.",
+				);
+			const existing = new Set(
+				snapshot.items
+					.filter(
+						(row) =>
+							row.role !== "destination" &&
+							row.scope.kind === "note",
+					)
+					.map((row) => row.source.path),
+			);
+			const incoming = noteDropPaths(paths).filter(
+				(path) => !existing.has(path),
+			);
+			const captures = await Promise.allSettled(
+				incoming.map(
+					async (path): Promise<ContextItem> => ({
+						id: crypto.randomUUID(),
+						source: {
+							path,
+							text: await vaultService.readNote(path),
+							capturedAt: Date.now(),
+						},
+						scope: { kind: "note" },
+						lifetime: "turn",
+						role: "reference",
+					}),
+				),
+			);
+			const items = captures.flatMap((capture) =>
+				capture.status === "fulfilled" ? [capture.value] : [],
+			);
+			if (items.length)
+				await guardedUpdate(
+					(old) => stageDroppedNotes(old, items),
+					`add:${crypto.randomUUID()}`,
+				);
+			const failed = incoming.filter(
+				(_, i) => captures[i].status === "rejected",
+			);
+			if (failed.length)
+				throw new Error(`Could not stage: ${failed.join(", ")}`);
+		});
 	const contextRow = companion.state ? (
 		<ComposerContext
 			chips={contextChips}
@@ -2460,6 +2509,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 			onApprovePermission={agent.approvePermission}
 			autoMentionEnabled={settings.autoMentionActiveNote}
 			contextRow={contextRow}
+			onStageNotes={stageNotes}
 			suggestions={suggestions}
 			plugin={plugin}
 			view={viewHost}

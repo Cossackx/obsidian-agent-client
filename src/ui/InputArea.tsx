@@ -29,7 +29,7 @@ import { PermissionDialog } from "./PermissionDialog";
 import { AttachmentStrip } from "./shared/AttachmentStrip";
 import { InputToolbar } from "./InputToolbar";
 import { getLogger } from "../utils/logger";
-import { insertMentions } from "../utils/mention-parser";
+import { routeVaultDrop } from "../services/stage-note-drop";
 import { getVaultDragFiles, mimeTypeFromExtension } from "../utils/vault-drag";
 import type { ErrorInfo } from "../types/errors";
 import type { AgentUpdateNotification } from "../services/update-checker";
@@ -214,6 +214,7 @@ export interface InputAreaProps {
 	autoMentionEnabled: boolean;
 	/** Composer context row; replaces the legacy auto-mention badge. */
 	contextRow?: React.ReactNode;
+	onStageNotes: (paths: string[]) => Promise<void>;
 	/** Input suggestions (mentions + slash commands) */
 	suggestions: UseSuggestionsReturn;
 	/** Plugin instance */
@@ -289,6 +290,7 @@ export function InputArea({
 	onApprovePermission,
 	autoMentionEnabled,
 	contextRow,
+	onStageNotes,
 	suggestions,
 	plugin,
 	view,
@@ -609,25 +611,6 @@ export function InputArea({
 	);
 
 	/**
-	 * Insert `@[[note]]` mentions for notes dropped onto the input, at the
-	 * textarea's caret.
-	 */
-	const insertNoteMentions = useCallback(
-		(notes: TFile[]) => {
-			if (notes.length === 0) return;
-			const position =
-				textareaRef.current?.selectionEnd ?? inputValue.length;
-			const { newText, newCursorPos } = insertMentions(
-				inputValue,
-				position,
-				notes.map((note) => note.path),
-			);
-			setTextAndFocus(newText, newCursorPos);
-		},
-		[inputValue, setTextAndFocus],
-	);
-
-	/**
 	 * Whether a drag carries something the input box accepts: OS files
 	 * (Finder/Explorer) or vault files from an Obsidian-internal drag (file
 	 * explorer, search results, links, ...). Evaluated identically on
@@ -690,7 +673,7 @@ export function InputArea({
 	 * Handle drop event for file attachments.
 	 * Images are embedded as Base64 if agent supports it, otherwise sent as resource_link.
 	 * Non-image files are always sent as resource_link.
-	 * Markdown notes dragged from inside Obsidian become `@[[note]]` mentions.
+	 * Markdown notes dragged from inside Obsidian become scoped note chips.
 	 */
 	const handleDrop = useCallback(
 		async (e: React.DragEvent) => {
@@ -708,13 +691,12 @@ export function InputArea({
 				// inserting the URL and Obsidian's own leaf drop handling.
 				e.preventDefault();
 
-				insertNoteMentions(vaultDrag.notes);
-				if (vaultDrag.skippedCount > 0) {
-					new Notice("[Agent Client] Folders cannot be attached");
-				}
-				addAttachments(
-					await convertVaultFilesToAttachments(vaultDrag.files),
-				);
+				await routeVaultDrop(vaultDrag, {
+					stage: onStageNotes,
+					convert: convertVaultFilesToAttachments,
+					attach: addAttachments,
+					notice: (message) => new Notice(message),
+				});
 				return;
 			}
 
@@ -765,7 +747,7 @@ export function InputArea({
 			convertImagesToAttachments,
 			convertFilesToAttachments,
 			convertVaultFilesToAttachments,
-			insertNoteMentions,
+			onStageNotes,
 			addAttachments,
 		],
 	);
