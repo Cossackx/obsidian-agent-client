@@ -139,6 +139,7 @@ export async function stageCapturedSelection(
 					? `${old}\n\n${editSeed}`
 					: editSeed,
 		);
+	return item.id;
 }
 
 export function selectionRevisionTarget(

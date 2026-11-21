@@ -378,12 +378,16 @@ export default class AgentClientPlugin extends Plugin {
 	}
 
 	/** Keeps identity stable across the initial read and outbound approval. */
-	bindSelectionPreimage(path: string) {
+	bindSelectionPreimage(path: string, file: TFile | undefined) {
 		const vault = this.app.vault;
-		const file = vault.getAbstractFileByPath(path);
-		if (!isNotePath(path) || !(file instanceof TFile))
+		if (
+			!isNotePath(path) ||
+			!(file instanceof TFile) ||
+			file.path !== path ||
+			vault.getAbstractFileByPath(path) !== file
+		)
 			throw new Error(
-				"The selected note no longer exists. Select the passage again.",
+				"The originally selected note moved, was replaced or is no longer known. Select the passage again to request a new diff.",
 			);
 		const exists = () =>
 			file.path === path && vault.getAbstractFileByPath(path) === file;
@@ -399,7 +403,7 @@ export default class AgentClientPlugin extends Plugin {
 				);
 			return saved;
 		};
-		return Object.assign(read, { stillTarget: exists });
+		return Object.assign(read, { stillTarget: exists, file });
 	}
 
 	async onload() {

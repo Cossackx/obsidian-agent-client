@@ -539,11 +539,14 @@ export const ChatPanel = React.memo(function ChatPanel({
 		if (session.sessionId && variant === "sidebar")
 			void plugin.app.workspace.requestSaveLayout();
 	}, [session.sessionId, variant, plugin]);
+	/** Live only: context item id -> TFile seen when it was captured. */
+	const selectionWitnesses = useRef(new Map<string, TFile>());
 	const stageSelection = useRef<
 		Parameters<typeof plugin.registerCompanionSelection>[1]
 	>(() => undefined);
 	stageSelection.current = () => {
 		const id = session.sessionId;
+		const vault = plugin.app.vault;
 		if (!id || companion.state?.sessionId !== id || !canMutate())
 			throw new Error(
 				"The target conversation is not ready to stage context.",
@@ -552,7 +555,10 @@ export const ChatPanel = React.memo(function ChatPanel({
 			owns: ownsComposer,
 			stage: (source, range, purpose, check) =>
 				runMutation(async () => {
-					await stageCapturedSelection(
+					check();
+					// Identity at selection time; Send/Accept must prove this same file.
+					const file = vault.getAbstractFileByPath(source.path);
+					const itemId = await stageCapturedSelection(
 						source,
 						range,
 						purpose,
@@ -566,6 +572,8 @@ export const ChatPanel = React.memo(function ChatPanel({
 							if (ownsComposer()) composer.changeDraft(change);
 						},
 					);
+					if (file instanceof TFile)
+						selectionWitnesses.current.set(itemId, file);
 					if (ownsComposer())
 						new Notice(
 							purpose === "ask"
@@ -700,8 +708,18 @@ export const ChatPanel = React.memo(function ChatPanel({
 		{ rows: ReplyProposal[]; current: () => boolean }[]
 	>([]);
 	const recordReplyProposals = (rows: ReplyProposal[]) => {
-		if (ownsComposer())
-			setReplyProposals((old) => [
+		if (!ownsComposer()) return;
+		for (const row of rows)
+			if (row.file)
+				try {
+					selectionBindings.current.set(
+						row.proposal.id,
+						plugin.bindSelectionPreimage(row.proposal.path, row.file),
+					);
+				} catch {
+					// Unbound: Accept refuses and asks for a fresh selection.
+				}
+		setReplyProposals((old) => [
 				...old.filter((entry) => entry.current()),
 				{ rows, current: ownsComposer },
 			]);
@@ -709,7 +727,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 	const selectionBindings = useRef(
 		new Map<
 			string,
-			(() => Promise<string>) & { stillTarget?: () => boolean }
+			(() => Promise<string>) & { stillTarget?: () => boolean; file?: TFile }
 		>(),
 	);
 	const reviewNext = useRef(false);
@@ -822,7 +840,10 @@ export const ChatPanel = React.memo(function ChatPanel({
 			const edit = selectionRevisionTarget(snapshot, saved);
 			let editPreimage: string | undefined;
 			let readEditPreimage:
-				| ((() => Promise<string>) & { stillTarget?: () => boolean })
+				| ((() => Promise<string>) & {
+						stillTarget?: () => boolean;
+						file?: TFile;
+				  })
 				| undefined;
 			if (edit) {
 				if (turn || !userSubmitted)
@@ -831,6 +852,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 					);
 				readEditPreimage = plugin.bindSelectionPreimage(
 					edit.source.path,
+					selectionWitnesses.current.get(edit.id),
 				);
 				const bound = readEditPreimage;
 				editPreimage = await readEditPreimage();
@@ -907,24 +929,33 @@ export const ChatPanel = React.memo(function ChatPanel({
 			const represented = representedItems(snapshot.items);
 			const captureNotices: string[] = [];
 			const selection = suggestions.mentions.activeNote?.selection;
-			let followFresh: () => boolean = () => true;
+			let followFresh: () => boolean | Promise<boolean> = () => true;
 			if (!turn && followOn && followActivePath && selection) {
 				let valid = false;
+				const matches = (
+					live: Awaited<
+						ReturnType<typeof vaultService.captureActiveSelection>
+					>,
+				) =>
+					!!live &&
+					live.stillTarget?.() !== false &&
+					live.path === followActivePath &&
+					live.range.start === selection.range?.start &&
+					live.range.end === selection.range.end &&
+					live.text.slice(live.range.start, live.range.end) ===
+						selection.text;
 				try {
 					// Check that the note still exists, and use the actual editor
 					// selection where available (not the cached follow metadata).
 					await vaultService.readNote(followActivePath);
 					const live =
 						await vaultService.captureActiveSelection(true);
-					if (live?.stillTarget) followFresh = live.stillTarget;
-					valid =
-						!!live &&
-						live.stillTarget?.() !== false &&
-						live.path === followActivePath &&
-						live.range.start === selection.range?.start &&
-						live.range.end === selection.range.end &&
-						live.text.slice(live.range.start, live.range.end) ===
-							selection.text;
+					const original = live?.stillTarget;
+					// Final decision: same file AND the same selected range and bytes.
+					followFresh = async () =>
+						(!original || original()) &&
+						matches(await vaultService.captureActiveSelection(true));
+					valid = matches(live);
 				} catch {
 					// An unverified capture is only eligible for explicit review.
 				}
@@ -985,7 +1016,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 					},
 					approvePayload: async (blocks, sources, notices) => {
 						// Re-check the followed selection at the actual dispatch decision.
-						if (followActivePath && !followFresh())
+						if (followActivePath && !(await followFresh()))
 							captureNotices.push(
 								`${followActivePath}: the selected note changed or was removed; review the frozen excerpt.`,
 							);
@@ -2257,6 +2288,11 @@ export const ChatPanel = React.memo(function ChatPanel({
 						const bound = selectionBindings.current.get(
 							proposal.id,
 						);
+						// Existing-note edits need their captured identity; never rebind by path.
+						if (!bound && proposal.before !== null)
+							throw new Error(
+								"The originally selected note is no longer known. Select it again to request a new diff.",
+							);
 						// Throws (no write) if the originally read note moved or was replaced.
 						if (bound) await bound();
 						const target = bound?.stillTarget;
@@ -2264,6 +2300,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 							state.sessionId,
 							proposal,
 							target ? () => current() && target() : current,
+							bound?.file,
 						);
 					})
 				}
@@ -2591,6 +2628,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 					runMutation={runMutation}
 					guardedUpdate={guardedUpdate}
 					onProposals={recordReplyProposals}
+					witnesses={selectionWitnesses.current}
 					onClose={() => setToolsOpen(false)}
 					followPath={followActivePath}
 					messages={messages}

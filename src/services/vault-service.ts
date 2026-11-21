@@ -326,7 +326,12 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 	async captureActiveSelection(
 		allowCaret = false,
 	): Promise<
-		| (SourceSnapshot & { range: TextRange; stillTarget?: () => boolean })
+		| (SourceSnapshot & {
+				range: TextRange;
+				stillTarget?: () => boolean;
+				/** Live editor file; strip before persisting. */
+				file?: TFile;
+		  })
 		| null
 	> {
 		const workspace = this.plugin.app.workspace;
@@ -353,8 +358,11 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 				selection.anchor,
 				selection.head ?? selection.anchor,
 			);
+			// Non-enumerable: spreads, JSON and structuredClone never persist it.
+			const live = (capture: SourceSnapshot & { range: TextRange }) =>
+				Object.defineProperty(capture, "file", { value: file });
 			return allowCaret || range.start < range.end
-				? {
+				? live({
 						path,
 						text,
 						range,
@@ -366,7 +374,7 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 									path,
 								) === file,
 						}),
-					}
+					})
 				: null;
 		}
 		if (allowCaret) return null;

@@ -1,9 +1,15 @@
 import * as React from "react";
+import type { TFile } from "obsidian";
 import type { NoteEditProposal, WriteReceipt } from "../types/note-companion";
 import { describeNoteTarget } from "../services/note-edit-planner";
 import { computeDiffLines } from "../utils/diff-lines";
 
-export type ReplyProposal = { proposal: NoteEditProposal; comment?: string };
+export type ReplyProposal = {
+	proposal: NoteEditProposal;
+	comment?: string;
+	/** Live, never persisted: the existing note captured when the target was chosen. */
+	file?: TFile;
+};
 
 function ReplyDiff({
 	row,

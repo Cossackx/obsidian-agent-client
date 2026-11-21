@@ -127,6 +127,7 @@ export function ContextTray({
 	busy,
 	send,
 	onProposals,
+	witnesses,
 	onClose,
 	followPath,
 }: {
@@ -146,6 +147,8 @@ export function ContextTray({
 	busy: boolean;
 	send: (turn: StructuredTurn) => Promise<boolean>;
 	onProposals: (rows: ReplyProposal[]) => void;
+	/** Live only: context item id -> TFile captured with it. */
+	witnesses: Map<string, TFile>;
 	onClose: () => void;
 	followPath?: string;
 }) {
@@ -323,11 +326,14 @@ export function ContextTray({
 		const id = crypto.randomUUID();
 		let item: ContextItem;
 		if (scope === "passage") {
-			const source = await vaultService.captureActiveSelection();
-			if (!source)
+			const capture = await vaultService.captureActiveSelection();
+			if (!capture || capture.stillTarget?.() === false)
 				throw new Error(
 					"Select a passage in an open source editor first.",
 				);
+			// Keep durable state plain; the live identity goes to witnesses.
+			const { file, ...source } = capture;
+			if (file) witnesses.set(id, file);
 			item = {
 				id,
 				source,
@@ -382,6 +388,7 @@ export function ContextTray({
 			);
 			if (current.current !== sessionId) return;
 			frozenTarget.current = {
+				file: app.vault.getAbstractFileByPath(capture.path),
 				source: saved,
 				anchor: {
 					kind: "range",
@@ -415,7 +422,11 @@ export function ContextTray({
 			const picked = await choose(app, `Placement in ${path}`, options);
 			if (!picked) return;
 			target = picked;
-			frozenTarget.current = null;
+			frozenTarget.current = {
+				file: app.vault.getAbstractFileByPath(path),
+				source,
+				anchor: picked,
+			};
 		}
 		if (current.current === sessionId)
 			await update(
@@ -424,6 +435,8 @@ export function ContextTray({
 			);
 	};
 	const frozenTarget = React.useRef<{
+		/** Identity at destination choice; Accept refuses any substitute. */
+		file: unknown;
 		source: SourceSnapshot;
 		anchor: DestinationAnchor;
 	} | null>(null);
@@ -525,6 +538,7 @@ export function ContextTray({
 												id,
 											),
 											comment: revision.comment,
+											file: witnesses.get(item.id),
 										},
 									]
 								: [];
@@ -564,6 +578,21 @@ export function ContextTray({
 			app.vault.getAbstractFileByPath(target.path)
 		)
 			throw new Error("The new-note path already exists.");
+		const chosen = frozenTarget.current;
+		const file =
+			intent === "new-note"
+				? undefined
+				: chosen &&
+					  JSON.stringify(chosen.anchor) === JSON.stringify(target) &&
+					  chosen.file instanceof TFile &&
+					  chosen.file.path === target.path &&
+					  app.vault.getAbstractFileByPath(target.path) === chosen.file
+					? chosen.file
+					: null;
+		if (file === null)
+			throw new Error(
+				"Choose the destination heading again; the original note is no longer known.",
+			);
 		const original = intent === "new-note" ? null : await read(target.path);
 		const section =
 			original && target.kind === "heading"
@@ -645,6 +674,7 @@ export function ContextTray({
 								...proposal,
 								sourceMessageId: generatedId,
 							},
+							file,
 						},
 					]);
 					if (surfaceAlive())
