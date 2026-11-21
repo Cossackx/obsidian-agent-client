@@ -40,6 +40,9 @@ export function useNoteCompanion(
 			{ id: string; kind: string; revision: number; change: Change }
 		>(),
 	);
+	/** Intent history: last successful full-note add per [session, path]. */
+	const noteAdds = useRef(new Map<string, number>());
+	const addOrder = useRef(0);
 	const restore = useRef(restoreDraft);
 	restore.current = restoreDraft;
 	const save = useCallback(
@@ -60,6 +63,9 @@ export function useNoteCompanion(
 			revisions.current.set(key, revision);
 			// Tray adds are insertion intents, including multi-item batches.
 			const isAdd = kind.startsWith("add:");
+			const attempt = ++addOrder.current;
+			const noteKey = (item: ContextItem) =>
+				JSON.stringify([id, item.source.path]);
 			let attempted: ContextItem[] = [];
 			let retryChange = change;
 			let readbackUnavailable = false;
@@ -115,17 +121,13 @@ export function useNoteCompanion(
 														`item:${item.id}:remove`,
 													]),
 												) &&
-												// A newer capture of the same path and scope supersedes this one.
-												!old.items.some(
-													(row) =>
-														row.source.path ===
-															item.source.path &&
-														JSON.stringify(
-															row.scope,
-														) ===
-															JSON.stringify(
-																item.scope,
-															),
+												// A later successful full-note add supersedes this one, even if since removed.
+												!(
+													item.scope.kind ===
+														"note" &&
+													(noteAdds.current.get(
+														noteKey(item),
+													) ?? 0) > attempt
 												),
 										),
 									],
@@ -164,6 +166,10 @@ export function useNoteCompanion(
 						: await storage.update(id, change);
 				if (revisions.current.get(key) === revision)
 					failed.current.delete(key);
+				if (isAdd)
+					for (const item of attempted)
+						if (item.scope.kind === "note")
+							noteAdds.current.set(noteKey(item), attempt);
 				if (active.current === id) {
 					setState(result);
 					if (
