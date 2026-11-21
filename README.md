@@ -26,7 +26,7 @@ MCP servers, Agent Skills, slash commands, permission prompts — whatever your 
 
 Built on the [Agent Client Protocol (ACP)](https://github.com/agentclientprotocol/agent-client-protocol) by Zed.
 
-**Fork development:** [Note Companion](docs/usage/note-companion.md) lets you stage passages or notes, preview the prompt, and place replies with a local diff and verified write receipt. It also supports annotated review, source-linked synthesis, and note-linked conversation recovery. The manifest remains `0.13.2`; the upstream badges and installation links do not represent a Note Companion release.
+**Fork development:** [Note Companion](docs/usage/note-companion.md) stages dropped notes and editor selections in the composer. Review the exact prompt when needed, insert a reply as written, or request a revision and accept its diff on the reply. The chat header opens note-linked history. The manifest remains `0.13.2`; the upstream badges and installation links do not represent a Note Companion release.
 
 ![Chat with an agent in the sidebar, right next to your notes](https://raw.githubusercontent.com/RAIT-09/obsidian-agent-client/master/docs/public/images/readme-hero-sidebar.webp)
 

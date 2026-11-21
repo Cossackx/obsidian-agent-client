@@ -90,7 +90,10 @@ export async function openNoteSessionPicker(
 						options.newChat(
 							choices
 								.filter(({ checkbox }) => checkbox.checked)
-								.map(({ item }) => item),
+								.map(({ item }) => ({
+									...item,
+									selectionEdit: undefined,
+								})),
 						),
 					);
 				};

@@ -33,6 +33,7 @@ export interface ComposerChip {
 	scope: string;
 	itemId?: string;
 	pinned: boolean;
+	selectionEdit?: true;
 	status?: string;
 }
 
@@ -55,6 +56,7 @@ export function composerChips(input: {
 			path: item.source.path,
 			itemId: item.id,
 			pinned: item.lifetime === "session",
+			...(item.selectionEdit && { selectionEdit: item.selectionEdit }),
 			status: item.status,
 			scope:
 				item.scope.kind === "note"

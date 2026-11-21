@@ -7,6 +7,7 @@ import {
 } from "../src/services/reply-note-action";
 import { ReplyNoteActions } from "../src/ui/ReplyNoteActions";
 import type { ChatMessage } from "../src/types/chat";
+import type { NoteEditProposal } from "../src/types/note-companion";
 import { planLiteralEdit } from "../src/services/note-edit-planner";
 
 const reply: ChatMessage = {
@@ -17,7 +18,7 @@ const reply: ChatMessage = {
 };
 const path = "Target.md";
 const before = "🌱\r\nroot";
-const apply = vi.fn(async (_id, proposal) => ({
+const apply = vi.fn(async (_id: string, proposal: NoteEditProposal) => ({
 	operationId: proposal.id,
 	path,
 	status: "verified" as const,

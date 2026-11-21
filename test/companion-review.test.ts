@@ -3,6 +3,7 @@ import { preparePrompt } from "../src/services/message-sender";
 import { prepareContext } from "../src/services/context-builder";
 import { selectOption } from "../src/services/message-state";
 import { compareSource } from "../src/services/source-comparison";
+import { decideSendReview } from "../src/services/send-review-policy";
 import type { ContextItem } from "../src/types/note-companion";
 
 const limits = {
@@ -52,6 +53,60 @@ it.each([false, true])(
 		expect(JSON.stringify(prepared.agentContent)).toContain("TARGET");
 		expect(JSON.stringify(prepared.agentContent)).not.toContain("Outside");
 		expect(getNoteWikiLinks).not.toHaveBeenCalled();
+	},
+);
+
+it.each([false, true])(
+	"only public linked-note metadata reaches review and dispatch (%s)",
+	async (supportsEmbeddedContext) => {
+		const prepared = await preparePrompt(
+			{
+				message: "Discuss @[[Source]]",
+				vaultBasePath: "/synthetic",
+				supportsEmbeddedContext,
+				preparedContext: prepareContext([], {
+					...limits,
+					excludedPaths: ["Private/Destination.md"],
+				}),
+				expandWikilinkContext: true,
+				wikilinkResolver: {
+					getNoteWikiLinks: () => [
+						{
+							linkText: "PrivateAlias",
+							resolvedPath: "Private/Destination.md",
+						},
+						{ linkText: "PublicAlias", resolvedPath: "Public.md" },
+					],
+				},
+			},
+			{ readNote: async () => "Note body" } as never,
+			{
+				getAllFiles: () => [
+					{
+						path: "Source.md",
+						basename: "Source",
+						stat: { mtime: 0 },
+					},
+				],
+			} as never,
+		);
+		const outbound = JSON.stringify(prepared.agentContent);
+		expect(outbound).toContain("PublicAlias");
+		expect(outbound).not.toContain("PrivateAlias");
+		expect(outbound).not.toContain("Destination.md");
+		expect(prepared.sources).toHaveLength(1);
+		const represented = [
+			{ ...prepared.sources[0], provenance: "mention" as const },
+		];
+		expect(
+			decideSendReview({
+				sources: prepared.sources,
+				represented,
+				notices: prepared.notices ?? [],
+				generated: false,
+				requested: false,
+			}).required,
+		).toBe(true);
 	},
 );
 

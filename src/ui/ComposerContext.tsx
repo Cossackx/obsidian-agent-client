@@ -49,6 +49,7 @@ export function ComposerContext({
 							}
 						>
 							{chip.kind === "following" ? "↻ " : ""}
+							{chip.selectionEdit ? "Suggest edit: " : ""}
 							{baseName(chip.path)}
 							{chip.status ? ` · ${chip.status}` : ""}
 						</button>
@@ -119,6 +120,12 @@ export function ComposerContext({
 							Sent with each turn while this note is active,
 							within the note-length limit. Removing it keeps it
 							off for this conversation.
+						</small>
+					)}
+					{detail.selectionEdit && (
+						<small>
+							Send to request a revision, or remove this chip to
+							cancel the edit request.
 						</small>
 					)}
 					{detail.status && (

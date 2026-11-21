@@ -142,7 +142,7 @@ The message was sent but the agent returned an error.
 
 ## Note Companion issues
 
-- **The tray is missing:** Check that this is the fork's desktop development build; `0.13.2` alone does not distinguish it from upstream. Model-backed actions also require a configured ACP agent and a live session.
+- **I cannot find the selection actions or composer chips:** Check that this is the fork's desktop development build; `0.13.2` alone does not distinguish it from upstream. Focus the intended chat first, then select text in an editable Markdown note. If the editor or conversation changed during handoff, select the passage again. Model-backed sends require a configured ACP agent and a live session.
 - **Context looks stale or incomplete:** Inspect **Review outbound context**. Refresh a note or heading, recapture a selection, and check the note and selection limits. A canceled preview sends nothing; an uncertain turn is not automatically repeated.
 - **There is history but I cannot send:** Check **Connection details**. **Reconnect** needs the saved agent and working directory and cannot substitute a new session for a failed restore. Use the owning view if the conversation is already open, or start a distinct chat with checked context.
 - **A preview no longer applies:** Save or resolve destination edits and preview again. For `pending`, `unknown`, or `undo-pending`, inspect the file and choose **Reconcile without writing** in **Write receipts** before retrying. Do not bypass a save warning by repeating the edit.

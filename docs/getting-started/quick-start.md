@@ -51,7 +51,7 @@ The chat panel opens in the right sidebar. Type a message and press Enter!
 
 ### Try Note Companion in the fork build
 
-Open a Markdown note, select a passage, then open **Note tools** in the composer and choose **Add selection**; a chip shows it. Type your question and send, or choose **Review & send** to inspect **Review outbound context** before clicking **Send these blocks**. To place a reply without another model request, choose **Use in note…** under the reply and review the diff before applying. See the [Note Companion guide](/usage/note-companion).
+Focus your chat, select a passage in a Markdown editor, then choose **Ask XO about selection** from the editor context menu or command palette. The passage appears as a chip. **Suggest edit to selection** also adds an editable request; no prompt is sent until you submit it. You can drop vault Markdown notes onto the composer to stage them. Use **Review & send** to inspect the exact outbound blocks, **Insert in note…** on a reply to place it as written, or **Note conversations** in the header to find related history. See the [Note Companion guide](/usage/note-companion).
 
 - Learn about [Note Mentions](/usage/mentions) to reference your notes in conversations
 - Explore [Slash Commands](/usage/slash-commands) for quick actions

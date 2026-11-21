@@ -24,9 +24,15 @@ export function consumeSubmittedItems(
 	const consumed = new Set(sentItemIds);
 	return {
 		...state,
-		items: state.items.filter(
-			(item) => item.lifetime === "session" || !consumed.has(item.id),
-		),
+		items: state.items
+			.filter(
+				(item) => item.lifetime === "session" || !consumed.has(item.id),
+			)
+			.map((item) =>
+				item.selectionEdit && consumed.has(item.id)
+					? { ...item, selectionEdit: undefined }
+					: item,
+			),
 	};
 }
 

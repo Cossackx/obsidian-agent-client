@@ -49,6 +49,11 @@ import { ReplyNoteActions, type ReplyProposal } from "./ReplyNoteActions";
 import { insertReply } from "../services/reply-note-action";
 import { chooseReplyTarget } from "./ReplyTargetPicker";
 import { readCorrelatedReply } from "../services/passage-review";
+import {
+	prepareSelectionRevision,
+	selectionRevisionTarget,
+	stageCapturedSelection,
+} from "../services/editor-selection-action";
 import { confirmPayload } from "./ContextPreviewModal";
 import { ComposerContext } from "./ComposerContext";
 import {
@@ -503,38 +508,44 @@ export const ChatPanel = React.memo(function ChatPanel({
 	}, [session.sessionId, variant, plugin]);
 	const stageSelection = useRef<
 		Parameters<typeof plugin.registerCompanionSelection>[1]
-	>(async () => undefined);
-	stageSelection.current = async (source, range) => {
+	>(() => undefined);
+	stageSelection.current = () => {
 		const id = session.sessionId;
-		if (
-			!id ||
-			companion.state?.sessionId !== id ||
-			changingOwner.current ||
-			preparingCompanion.current ||
-			isSending
-		)
+		if (!id || companion.state?.sessionId !== id || !canMutate())
 			throw new Error(
 				"The target conversation is not ready to stage context.",
 			);
-		await plugin.companionStorage.update(id, (old) => {
-			if (!ownsComposer())
-				throw new Error(
-					"Conversation changed before staging selection",
-				);
-			return putItem(old, {
-				id: crypto.randomUUID(),
-				source,
-				scope: { kind: "passage", range },
-				role: "reference",
-				lifetime: "turn",
-			});
-		});
-		new Notice(`Selection staged from ${source.path}. Nothing was sent.`);
+		return {
+			owns: ownsComposer,
+			stage: (source, range, purpose, check) =>
+				runMutation(async () => {
+					await stageCapturedSelection(
+						source,
+						range,
+						purpose,
+						check,
+						(change) =>
+							plugin.companionStorage.update(
+								id,
+								guardCompanionChange(canMutate, change),
+							),
+						(change) => {
+							if (ownsComposer()) composer.changeDraft(change);
+						},
+					);
+					if (ownsComposer())
+						new Notice(
+							purpose === "ask"
+								? "Selection added. Nothing was sent."
+								: "Edit request drafted. Nothing was sent.",
+						);
+				}),
+		};
 	};
-	useEffect(
+	useLayoutEffect(
 		() =>
-			plugin.registerCompanionSelection(viewId, (source, range) =>
-				stageSelection.current(source, range),
+			plugin.registerCompanionSelection(viewId, () =>
+				stageSelection.current(),
 			),
 		[plugin, viewId],
 	);
@@ -728,6 +739,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 		content: string,
 		attachments?: AttachedFile[],
 		turn?: StructuredTurn,
+		userSubmitted = false,
 	) => {
 		setGeminiNoticeDismissed(true);
 		if (mutations.busy) {
@@ -753,12 +765,46 @@ export const ChatPanel = React.memo(function ChatPanel({
 		setPreviewing(true);
 		const requested = reviewNext.current;
 		reviewNext.current = false;
-		const requestId = turn?.onReply ? crypto.randomUUID() : undefined;
 		try {
-			const current =
-				(await plugin.companionStorage.load(snapshot.sessionId)) ??
-				snapshot;
+			const saved = await plugin.companionStorage.load(
+				snapshot.sessionId,
+			);
+			const current = saved ?? snapshot;
 			if (!ownsComposer()) return false;
+			const edit = selectionRevisionTarget(snapshot, saved);
+			let editPreimage: string | undefined;
+			let readEditPreimage: (() => Promise<string>) | undefined;
+			if (edit) {
+				if (turn || !userSubmitted)
+					throw new Error(
+						"Send or remove the staged edit before using another chat action.",
+					);
+				readEditPreimage = plugin.bindSelectionPreimage(
+					edit.source.path,
+				);
+				editPreimage = await readEditPreimage();
+				if (!ownsComposer()) return false;
+				const revision = prepareSelectionRevision(
+					edit,
+					editPreimage,
+					content,
+					plugin.settings.displaySettings.maxSelectionLength,
+				);
+				turn = {
+					text: revision.text,
+					intent: content,
+					// Keep staged sources; prefer the selected ID when equivalent captures deduplicate.
+					items: [
+						edit,
+						...current.items.filter((item) => item.id !== edit.id),
+					],
+					onReply: (result, assistantId) =>
+						recordReplyProposals([
+							revision.reply(result, assistantId),
+						]),
+				};
+			}
+			const requestId = turn?.onReply ? crypto.randomUUID() : undefined;
 			const items = [...(turn?.items ?? current.items)];
 			if (current.destination)
 				items.push({
@@ -864,14 +910,30 @@ export const ChatPanel = React.memo(function ChatPanel({
 							generated: !!turn,
 							requested,
 						});
-						if (!decision.required) return ownsComposer();
-						return (
-							(await confirmPayload(
+						if (
+							decision.required &&
+							!(await confirmPayload(
 								plugin.app,
 								blocks,
 								decision.reasons,
-							)) && ownsComposer()
-						);
+							))
+						)
+							return false;
+						if (!ownsComposer()) return false;
+						if (readEditPreimage) {
+							selectionRevisionTarget(
+								current,
+								await plugin.companionStorage.load(
+									snapshot.sessionId,
+								),
+							);
+							if (!ownsComposer()) return false;
+							if ((await readEditPreimage()) !== editPreimage)
+								throw new Error(
+									"The selected note changed during review. Select the passage again.",
+								);
+						}
+						return ownsComposer();
 					},
 					onConfirmed: (text, id, assistantId, sources) => {
 						if (sources.length)
@@ -911,8 +973,11 @@ export const ChatPanel = React.memo(function ChatPanel({
 	const handleSendMessageWithGeminiDismiss = async (
 		content: string,
 		attachments?: AttachedFile[],
+		userSubmitted = true,
 	) => {
-		return composer.send(() => sendWithCompanion(content, attachments));
+		return composer.send(() =>
+			sendWithCompanion(content, attachments, undefined, userSubmitted),
+		);
 	};
 	const sendCurrentRef = useRef(handleSendMessageWithGeminiDismiss);
 	sendCurrentRef.current = handleSendMessageWithGeminiDismiss;
@@ -1777,7 +1842,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 		const prompt = pendingAutoSend;
 		setPendingAutoSend(null);
 		if (inputValueRef.current === prompt)
-			void sendCurrentRef.current(prompt);
+			void sendCurrentRef.current(prompt, undefined, false);
 	}, [
 		pendingAutoSend,
 		companion.state,

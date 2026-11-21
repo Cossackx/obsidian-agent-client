@@ -406,6 +406,7 @@ interface WikilinkScanContext {
 	resolver: IWikilinkResolver;
 	vaultBasePath: string;
 	convertToWsl: boolean;
+	excludedPaths: ReadonlySet<string>;
 }
 
 /**
@@ -420,6 +421,7 @@ function buildWikilinkContext(
 		resolver: input.wikilinkResolver,
 		vaultBasePath: input.vaultBasePath,
 		convertToWsl: input.convertToWsl ?? false,
+		excludedPaths: new Set(input.preparedContext?.excludedPaths),
 	};
 }
 
@@ -442,7 +444,12 @@ function buildLinkedNotesBlock(
 	ctx: WikilinkScanContext | null,
 ): string | null {
 	if (!ctx) return null;
-	const links = ctx.resolver.getNoteWikiLinks(notePath, lineRange);
+	const links = ctx.resolver
+		.getNoteWikiLinks(notePath, lineRange)
+		.filter(
+			(link) =>
+				!link.resolvedPath || !ctx.excludedPaths.has(link.resolvedPath),
+		);
 	if (links.length === 0) return null;
 	return formatLinkedNotesBlock(links, sourceRef, {
 		vaultBasePath: ctx.vaultBasePath,

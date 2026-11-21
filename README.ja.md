@@ -26,7 +26,7 @@ MCP サーバー、Agent Skills、スラッシュコマンド、権限プロン�
 
 Zed の [Agent Client Protocol (ACP)](https://github.com/agentclientprotocol/agent-client-protocol) の上に構築されています。
 
-**このフォークの開発版:** [Note Companion](docs/usage/note-companion.md) ではノートや選択範囲の送信内容を確認でき、回答を差分の確認後にノートへ反映できます。書き込み結果の照合、注釈付きレビュー、出典付きの統合、ノートに関連する会話の再開にも対応します。マニフェストは `0.13.2` のままです。上流のバッジやインストール手順は Note Companion のリリースを示すものではありません。
+**このフォークの開発版:** [Note Companion](docs/usage/note-companion.md) では、ドラッグしたノートやエディターの選択範囲を入力欄に追加し、必要に応じて送信内容を確認できます。回答をそのまま挿入することも、修正案を依頼して回答に表示された差分を承認することもできます。チャットのヘッダーからノートに関連する会話履歴を開けます。マニフェストは `0.13.2` のままです。上流のバッジやインストール手順は Note Companion のリリースを示すものではありません。
 
 ![ノートの隣のサイドバーでエージェントとチャット](https://raw.githubusercontent.com/RAIT-09/obsidian-agent-client/master/docs/public/images/readme-hero-sidebar.webp)
 

@@ -1,5 +1,3 @@
-import { extractSelection } from "./utils/selection";
-import type { SourceSnapshot, TextRange } from "./types/note-companion";
 import {
 	Plugin,
 	WorkspaceLeaf,
@@ -9,7 +7,17 @@ import {
 	type MarkdownPostProcessorContext,
 	TFile,
 	MarkdownView,
+	type Editor,
+	type MarkdownFileInfo,
 } from "obsidian";
+import {
+	captureEditorSelection,
+	selectionActions,
+	stageEditorSelection,
+	type SelectionOwner,
+	type SelectionPurpose,
+} from "./services/editor-selection-action";
+import { normalizeLineEndings } from "./utils/selection";
 import * as semver from "semver";
 import {
 	CompanionStorage,
@@ -289,16 +297,107 @@ export default class AgentClientPlugin extends Plugin {
 
 	private selectionHandlers = new Map<
 		string,
-		(source: SourceSnapshot, range: TextRange) => Promise<void>
+		() => SelectionOwner | undefined
 	>();
 	registerCompanionSelection(
 		viewId: string,
-		handler: (source: SourceSnapshot, range: TextRange) => Promise<void>,
+		handler: () => SelectionOwner | undefined,
 	): () => void {
 		this.selectionHandlers.set(viewId, handler);
 		return () => {
 			if (this.selectionHandlers.get(viewId) === handler)
 				this.selectionHandlers.delete(viewId);
+		};
+	}
+
+	private stageNativeSelection(
+		editor: Editor,
+		context: MarkdownView | MarkdownFileInfo,
+		purpose: SelectionPurpose,
+		file = context.file,
+		path = file?.path ?? "",
+		captured?: ReturnType<typeof captureEditorSelection>,
+	) {
+		const sourceExists = () =>
+			!!file &&
+			context.file === file &&
+			file.path === path &&
+			(!context.editor || context.editor === editor) &&
+			(!(context instanceof MarkdownView) ||
+				context.getMode() === "source") &&
+			this.app.vault.getAbstractFileByPath(path) === file;
+		if (!sourceExists()) {
+			new Notice(
+				"The source editor changed or is unavailable. Select text in a Markdown source editor first.",
+			);
+			return;
+		}
+		void stageEditorSelection(
+			editor,
+			path,
+			purpose,
+			async () => {
+				const view = this.viewRegistry.getFocused();
+				const bind = view && this.selectionHandlers.get(view.viewId);
+				const owner = bind?.();
+				if (!view || !owner) return undefined;
+				const owns = () =>
+					this.viewRegistry.getFocused() === view &&
+					this.selectionHandlers.get(view.viewId) === bind &&
+					owner.owns();
+				await view.focus(owns);
+				if (owns() && !view.hasFocus())
+					throw new Error(
+						"The target composer could not be focused. Open it and try again.",
+					);
+				return { stage: owner.stage, owns };
+			},
+			sourceExists,
+			captured,
+		).catch(
+			(error: unknown) =>
+				new Notice(
+					error instanceof Error
+						? error.message
+						: "Could not stage the selection.",
+				),
+		);
+	}
+
+	private editorsMatchPreimage(path: string, preimage: string): boolean {
+		const expected = normalizeLineEndings(preimage);
+		return this.app.workspace
+			.getLeavesOfType("markdown")
+			.every(
+				({ view }) =>
+					!(view instanceof MarkdownView) ||
+					view.file?.path !== path ||
+					view.getMode() !== "source" ||
+					normalizeLineEndings(view.editor.getValue()) === expected,
+			);
+	}
+
+	/** Keeps identity stable across the initial read and outbound approval. */
+	bindSelectionPreimage(path: string) {
+		const vault = this.app.vault;
+		const file = vault.getAbstractFileByPath(path);
+		if (!isNotePath(path) || !(file instanceof TFile))
+			throw new Error(
+				"The selected note no longer exists. Select the passage again.",
+			);
+		const exists = () =>
+			file.path === path && vault.getAbstractFileByPath(path) === file;
+		return async () => {
+			if (!exists())
+				throw new Error(
+					"The selected note moved. Select the passage again.",
+				);
+			const saved = await vault.read(file);
+			if (!exists() || !this.editorsMatchPreimage(path, saved))
+				throw new Error(
+					"The selected note moved or has unsaved changes. Save and select the passage again.",
+				);
+			return saved;
 		};
 	}
 
@@ -315,24 +414,7 @@ export default class AgentClientPlugin extends Plugin {
 		this.noteActions = new NoteActionService(
 			this.app.vault,
 			this.companionStorage,
-			(path, preimage) => {
-				const normalize = (text: string) =>
-					text
-						.split(String.fromCharCode(13, 10))
-						.join("\n")
-						.split(String.fromCharCode(13))
-						.join("\n");
-				return this.app.workspace
-					.getLeavesOfType("markdown")
-					.every(
-						({ view }) =>
-							!(view instanceof MarkdownView) ||
-							view.file?.path !== path ||
-							view.getMode() !== "source" ||
-							normalize(view.editor.getValue()) ===
-								normalize(preimage),
-					);
-			},
+			(path, preimage) => this.editorsMatchPreimage(path, preimage),
 		);
 		this.settingsService = createSettingsService(this.settings, this);
 		this.registerEvent(
@@ -388,41 +470,42 @@ export default class AgentClientPlugin extends Plugin {
 		);
 		ribbonIconEl.addClass("agent-client-ribbon-icon");
 
-		this.addCommand({
-			id: "companion-add-selection",
-			name: "Add selection to note companion",
-			editorCallback: (editor, view) => {
-				if (!view.file || !editor.somethingSelected()) {
-					new Notice(
-						"Select text in a Markdown source editor first.",
+		for (const { id, label, purpose } of selectionActions)
+			this.addCommand({
+				id,
+				name: label,
+				editorCallback: (editor, view) =>
+					this.stageNativeSelection(editor, view, purpose),
+			});
+		this.registerEvent(
+			this.app.workspace.on("editor-menu", (menu, editor, view) => {
+				const file = view.file;
+				const path = file?.path;
+				if (!path || !isNotePath(path) || !editor.somethingSelected())
+					return;
+				let captured: ReturnType<typeof captureEditorSelection>;
+				try {
+					captured = captureEditorSelection(editor, path);
+				} catch {
+					return;
+				}
+				for (const { label, purpose } of selectionActions)
+					menu.addItem((item) =>
+						item
+							.setTitle(label)
+							.onClick(() =>
+								this.stageNativeSelection(
+									editor,
+									view,
+									purpose,
+									file,
+									path,
+									captured,
+								),
+							),
 					);
-					return;
-				}
-				const id = this.viewRegistry.getFocusedId();
-				const act = id ? this.selectionHandlers.get(id) : undefined;
-				if (!act) {
-					new Notice("Open and focus the target conversation first.");
-					return;
-				}
-				const text = editor.getValue();
-				const { range } = extractSelection(
-					text,
-					editor.getCursor("from"),
-					editor.getCursor("to"),
-				);
-				void act(
-					{ path: view.file.path, text, capturedAt: Date.now() },
-					range,
-				).catch(
-					(error: unknown) =>
-						new Notice(
-							error instanceof Error
-								? error.message
-								: "Could not stage the selection",
-						),
-				);
-			},
-		});
+			}),
+		);
 
 		this.addCommand({
 			id: "open-chat-view",
@@ -1245,7 +1328,7 @@ export default class AgentClientPlugin extends Plugin {
 				);
 				return;
 			}
-			this.viewRegistry.get(targetViewId)?.focus();
+			await this.viewRegistry.get(targetViewId)?.focus();
 		} else if (viewType === "floating") {
 			const container = this.openNewFloatingChat(
 				true,

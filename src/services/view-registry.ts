@@ -93,7 +93,7 @@ export interface IChatViewContainer {
 	 * Should focus the chat input textarea.
 	 * For floating views, this also expands the window if collapsed.
 	 */
-	focus(): void;
+	focus(owns?: () => boolean): void | Promise<void>;
 
 	/**
 	 * Check if this view currently has focus.
@@ -369,7 +369,9 @@ export class ChatViewRegistry {
 			: -1;
 		const nextIndex = (currentIndex + 1) % ids.length;
 		this.setFocused(ids[nextIndex]);
-		this.views.get(ids[nextIndex])?.focus();
+		void Promise.resolve(this.views.get(ids[nextIndex])?.focus()).catch(
+			() => undefined,
+		);
 	}
 
 	/**
@@ -385,7 +387,9 @@ export class ChatViewRegistry {
 			: 0;
 		const prevIndex = (currentIndex - 1 + ids.length) % ids.length;
 		this.setFocused(ids[prevIndex]);
-		this.views.get(ids[prevIndex])?.focus();
+		void Promise.resolve(this.views.get(ids[prevIndex])?.focus()).catch(
+			() => undefined,
+		);
 	}
 
 	// ============================================================

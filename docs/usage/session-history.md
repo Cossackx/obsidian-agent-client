@@ -68,7 +68,7 @@ Use restore when you want to **continue where you left off**.
 
 Restore prefers ACP `session/load` when advertised, otherwise `session/resume`. It must reconnect to the **same session ID**. Incoming replay belongs to the restored view and does not resend prompts, run old tools or recreate old permission choices. When an accepted local transcript is available, it takes precedence over agent replay.
 
-In [Note Companion](/usage/note-companion#continue-a-conversation), **Note conversations** lists associations for the active note's exact path. **Open history only** reads the saved transcript without a connection. **Resume with agent** uses the compatible saved agent and working directory; if it fails, the note picker opens local history instead. **Reconnect** does not turn a failed restore into a new conversation. A second view cannot take over the same saved ID while it has an owner.
+In [Note Companion](/usage/note-companion#continue-a-conversation), **Note conversations** in the sidebar, floating or embedded chat header lists associations for the active note's exact path. **Open history only** reads the saved transcript without a connection. **Resume with agent** uses the compatible saved agent and working directory; if it fails, the note picker opens local history instead. **Reconnect** does not turn a failed restore into a new conversation. A second view cannot take over the same saved ID while it has an owner.
 
 ### Fork
 

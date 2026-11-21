@@ -8,7 +8,7 @@ Commands operate on the **last focused chat view**. Click on a chat view to focu
 
 ## Chat Commands
 
-**Agent Client: Add selection to note companion** stages the current Markdown editor selection; it does not send a prompt. Review it in [Note Companion](/usage/note-companion). **Approve active permission** and **Reject active permission** act on a pending ACP request, not on the outbound preview or local note-change dialog.
+**Agent Client: Ask XO about selection** stages the current Markdown editor selection in the last-focused conversation. **Agent Client: Suggest edit to selection** stages it and adds an editable request without replacing the existing draft. Both actions are also in the editor context menu and neither sends a prompt. See [Note Companion](/usage/note-companion). **Approve active permission** and **Reject active permission** act on a pending ACP request, not on the outbound preview or a local note change.
 
 | Command | Description |
 |---------|-------------|

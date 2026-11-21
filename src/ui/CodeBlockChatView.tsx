@@ -198,7 +198,7 @@ export class EmbeddedChatViewContainer implements IChatViewContainer {
 		this.containerEl.classList.remove("is-focused");
 	}
 
-	focus(): void {
+	async focus(owns = () => true): Promise<void> {
 		// The block can be registered yet invisible: its host note may sit in
 		// a background tab (switching notes does NOT unmount embedded blocks).
 		// Reveal the hosting leaf first — scrollIntoView and textarea.focus()
@@ -206,34 +206,20 @@ export class EmbeddedChatViewContainer implements IChatViewContainer {
 		// revealLeaf and FloatingViewContainer.focus()'s expand.
 		const hostLeaf = this.findHostLeaf();
 		if (hostLeaf) {
-			void this.plugin.app.workspace.revealLeaf(hostLeaf).then(() => {
-				// The re-shown view re-attaches pruned sections with a delay
-				// that is not observable up front (one frame is measurably too
-				// short: focus() on a detached textarea is a silent no-op).
-				// Wait per frame, bounded, until the block is back in the DOM.
-				this.scrollAndFocusInputWhenConnected();
-			});
-			return;
+			await this.plugin.app.workspace.revealLeaf(hostLeaf);
+			// The re-shown view re-attaches pruned sections after a delay.
+			// Wait per frame, bounded, until the block is back in the DOM.
+			const deadline = Date.now() + 1000;
+			while (
+				owns() &&
+				!this.containerEl.isConnected &&
+				Date.now() <= deadline
+			)
+				await new Promise<void>((resolve) =>
+					window.requestAnimationFrame(() => resolve()),
+				);
 		}
-		this.scrollAndFocusInput();
-	}
-
-	/**
-	 * Bounded per-frame wait for the block to be (re-)attached to the DOM,
-	 * then scroll and focus. Sections far from the scroll position may stay
-	 * pruned; give up silently after one second so a miss costs nothing.
-	 */
-	private scrollAndFocusInputWhenConnected(
-		deadline = Date.now() + 1000,
-	): void {
-		if (this.containerEl.isConnected) {
-			this.scrollAndFocusInput();
-			return;
-		}
-		if (Date.now() > deadline) return;
-		window.requestAnimationFrame(() =>
-			this.scrollAndFocusInputWhenConnected(deadline),
-		);
+		if (owns() && this.containerEl.isConnected) this.scrollAndFocusInput();
 	}
 
 	/**

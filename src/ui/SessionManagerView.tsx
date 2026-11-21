@@ -71,7 +71,9 @@ const SessionItem = React.memo(function SessionItem({
 
 	// `view` is stable for the same viewId (registry holds the same instance),
 	// so this callback is stable across renders — keeping React.memo effective.
-	const handleClick = useCallback(() => view.focus(), [view]);
+	const handleClick = useCallback(() => {
+		void Promise.resolve(view.focus()).catch(() => undefined);
+	}, [view]);
 
 	const showMenu = useCallback(
 		(position: { x: number; y: number }) => {

@@ -23,6 +23,13 @@ import {
 	guardCompanionChange,
 } from "../src/services/companion-mutation";
 import { prepareContext } from "../src/services/context-builder";
+import {
+	prepareSelectionRevision,
+	selectionRevisionTarget,
+	stageCapturedSelection,
+	stageEditorSelection,
+} from "../src/services/editor-selection-action";
+import { readCorrelatedReply } from "../src/services/passage-review";
 import { compareSource } from "../src/services/source-comparison";
 import { preparePrompt } from "../src/services/message-sender";
 import { ChatViewRegistry } from "../src/services/view-registry";
@@ -31,7 +38,7 @@ import {
 	type ChatContextValue,
 } from "../src/ui/ChatContext";
 import { ContextTray, type StructuredTurn } from "../src/ui/ContextTray";
-import type { ContextItem } from "../src/types/note-companion";
+import type { CompanionState, ContextItem } from "../src/types/note-companion";
 
 const notice = vi.hoisted(() => vi.fn());
 const modal = vi.hoisted(() => ({
@@ -105,7 +112,10 @@ it.each(["send", "close", "same-ID restore", "owner switch"])(
 		const view = await mount(() => useCompanionComposer(id), disk.store);
 		const original = view.current;
 		const wait = deferred();
-		const transform = vi.fn((old) => ({ ...old, followDismissed: true }));
+		const transform = vi.fn((old: CompanionState) => ({
+			...old,
+			followDismissed: true,
+		}));
 		const capture = gate.run(original.ownsComposer, async () => {
 			await wait.promise;
 			return disk.store.update(
@@ -134,6 +144,202 @@ it.each(["send", "close", "same-ID restore", "owner switch"])(
 		expect(gate.busy).toBe(false);
 	},
 );
+it.each(["ask", "suggest-edit"] as const)(
+	"native %s stages through the owner gate without sending, and preserves live draft and captures",
+	async (purpose) => {
+		const disk = fixture();
+		await disk.store.update("A", (old) => ({
+			...old,
+			items: [item],
+			draft: "A prior draft",
+		}));
+		const gate = new CompanionMutationGate();
+		const send = vi.fn();
+		const view = await mount(
+			() => ({ ...useCompanionComposer("A"), send }),
+			disk.store,
+		);
+		const owner = view.current;
+		const focus = deferred();
+		const text = "Heading\nChosen 😀\nOther";
+		const editor = {
+			getValue: () => text,
+			getCursor: (which: "from" | "to") => ({
+				line: 1,
+				ch: which === "from" ? 0 : 9,
+			}),
+		};
+		await act(async () => {
+			const staging = stageEditorSelection(
+				editor,
+				"Draft.md",
+				purpose,
+				async () => {
+					await focus.promise;
+					return {
+						owns: owner.ownsComposer,
+						stage: (source, range, intent, check) =>
+							gate.run(owner.ownsComposer, async () => {
+								await stageCapturedSelection(
+									source,
+									range,
+									intent,
+									check,
+									(change) =>
+										disk.store.update(
+											"A",
+											guardCompanionChange(
+												owner.ownsComposer,
+												change,
+											),
+										),
+									owner.changeDraft,
+								);
+							}),
+					};
+				},
+				() => true,
+			);
+			owner.changeDraft("Draft typed while chat activates");
+			focus.resolve();
+			await staging;
+			await owner.companion.flush();
+		});
+		const saved = await disk.restart().load("A");
+		expect(saved?.items).toHaveLength(2);
+		expect(saved?.items[0]).toEqual(item);
+		const staged = saved!.items[1];
+		expect(staged).toMatchObject({
+			source: { path: "Draft.md", text },
+			scope: { kind: "passage", range: { start: 8, end: 17 } },
+			role: "reference",
+			lifetime: "turn",
+		});
+		const originalDraft = "Draft typed while chat activates";
+		const expected =
+			purpose === "ask"
+				? originalDraft
+				: `${originalDraft}\n\nSuggest a revision to the selected passage.`;
+		expect(view.current.inputValue).toBe(expected);
+		expect(saved?.draft).toBe(expected);
+		expect(staged.selectionEdit).toBe(purpose === "ask" ? undefined : true);
+		expect(send).not.toHaveBeenCalled();
+		if (purpose === "suggest-edit") {
+			const savedWithCRLF = text.replace(/\n/g, "\r\n");
+			const revision = prepareSelectionRevision(
+				staged,
+				savedWithCRLF,
+				"Make this shorter",
+				100,
+			);
+			expect(revision.text).toContain("Make this shorter");
+			const result = [
+				{
+					itemId: staged.id,
+					original: "Chosen 😀",
+					replacement: "Shorter",
+				},
+			];
+			const reply = JSON.stringify({ requestId: "right-turn", result });
+			expect(() => readCorrelatedReply(reply, "old-turn")).toThrow();
+			expect(() =>
+				revision.reply(
+					[{ ...result[0], itemId: item.id }],
+					"assistant",
+				),
+			).toThrow();
+			expect(
+				revision.reply(
+					readCorrelatedReply(reply, "right-turn"),
+					"assistant-42",
+				).proposal,
+			).toMatchObject({
+				path: "Draft.md",
+				sourceMessageId: "assistant-42",
+				before: savedWithCRLF,
+				after: "Heading\r\nShorter\r\nOther",
+			});
+			expect(saved?.operations).toEqual([]);
+			expect(() =>
+				prepareSelectionRevision(
+					staged,
+					"Moved passage",
+					"Make this shorter",
+					100,
+				),
+			).toThrow(/saved note changed/i);
+			expect(() =>
+				prepareSelectionRevision(
+					staged,
+					savedWithCRLF,
+					"Make this shorter",
+					2,
+				),
+			).toThrow(/limit/i);
+			expect(() =>
+				selectionRevisionTarget(saved!, { ...saved!, items: [item] }),
+			).toThrow(/staged edit changed/i);
+		}
+	},
+);
+
+it.each(["buffer", "same-ID lease"])(
+	"rechecks native selection at the queued storage transform when %s changes",
+	async (race) => {
+		const disk = fixture();
+		const view = await mount(() => useCompanionComposer("A"), disk.store);
+		const owner = view.current;
+		const gate = new CompanionMutationGate();
+		const waiting = deferred();
+		const entered = deferred();
+		let text = "Original";
+		const editor = {
+			getValue: () => text,
+			getCursor: (which: "from" | "to") => ({
+				line: 0,
+				ch: which === "from" ? 0 : 8,
+			}),
+		};
+		const result = stageEditorSelection(
+			editor,
+			"Original.md",
+			"suggest-edit",
+			async () => ({
+				owns: owner.ownsComposer,
+				stage: (source, range, intent, check) =>
+					gate.run(owner.ownsComposer, async () => {
+						await stageCapturedSelection(
+							source,
+							range,
+							intent,
+							check,
+							async (change) => {
+								entered.resolve();
+								await waiting.promise;
+								await disk.store.update(
+									"A",
+									guardCompanionChange(
+										owner.ownsComposer,
+										change,
+									),
+								);
+							},
+							owner.changeDraft,
+						);
+					}),
+			}),
+			() => true,
+		).catch((error: unknown) => error);
+		await entered.promise;
+		if (race === "buffer") text = "Modified";
+		else owner.invalidate();
+		waiting.resolve();
+		expect(await result).toBeInstanceOf(Error);
+		expect(await disk.store.load("A")).toBeNull();
+		expect(view.current.inputValue).toBe("");
+	},
+);
+
 function fixture() {
 	const files = new Map<string, string>();
 	let fail = false;

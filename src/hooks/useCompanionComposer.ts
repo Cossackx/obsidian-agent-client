@@ -23,6 +23,7 @@ export function useCompanionComposer(sessionId: string | null) {
 		};
 	}, []);
 	const revision = useRef(0);
+	const currentDraft = useRef<{ owner: object; text: string } | null>(null);
 	const [input, setInput] = useState<{ owner: object; text: string } | null>(
 		null,
 	);
@@ -34,11 +35,18 @@ export function useCompanionComposer(sessionId: string | null) {
 		if (!mounted.current || leaseRef.current.binding !== lease.binding)
 			return;
 		revision.current++;
-		setInput({ owner: lease.binding, text });
+		const next = { owner: lease.binding, text };
+		currentDraft.current = next;
+		setInput(next);
 	};
 	const companion = useNoteCompanion(sessionId, restore);
-	function changeDraft(text: string) {
+	function changeDraft(change: SetStateAction<string>) {
 		if (!ownsComposer() || !sessionId) return;
+		const old = currentDraft.current;
+		const text =
+			typeof change === "function"
+				? change(old?.owner === lease.binding ? old.text : "")
+				: change;
 		restore(text);
 		companion.setDraft(text);
 	}

@@ -106,6 +106,10 @@ function assertState(
 					String(item.role),
 				) &&
 				["turn", "session"].includes(String(item.lifetime)) &&
+				(item.selectionEdit === undefined ||
+					(item.selectionEdit === true &&
+						item.scope.kind === "passage" &&
+						item.role !== "destination")) &&
 				(item.annotation === undefined || str(item.annotation)) &&
 				(item.status === undefined ||
 					["changed", "missing", "renamed"].includes(

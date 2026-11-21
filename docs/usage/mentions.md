@@ -4,7 +4,7 @@ Reference your Obsidian notes directly in conversations with AI agents.
 
 ## Auto-Mention Active Note
 
-Auto-mention is separate from [Note Companion](/usage/note-companion). Use **Add selection**, **Add heading**, or **Add open note** for an explicit snapshot, and **Review & send** to review the assembled blocks. Removing the composer's **following** chip turns auto-mention off for that conversation. Staged and destination-only paths are not silently added again through normal mentions. Text you type still goes out, and these choices do not restrict agent tool access.
+Auto-mention follows the active note rather than pinning a snapshot. In [Note Companion](/usage/note-companion), use **Ask XO about selection**, drop a vault Markdown note onto the composer, or use **Note tools** to capture a heading. Dropping a vault note stages a chip instead of inserting a typed `@` mention. Removing the **following** chip keeps auto-follow off for that conversation. Staged and destination-only paths are not silently attached again through ordinary mentions. Use **Review & send** to inspect the exact blocks. These controls do not restrict agent tool access.
 
 When enabled, the plugin automatically includes the currently active note in your message. This is useful when you want to discuss or work on the note you're viewing.
 

@@ -37,6 +37,8 @@ export interface ContextItem {
 	scope: ContextScope;
 	role: "working" | "reference" | "destination";
 	lifetime: "turn" | "session";
+	/** This staged passage is the target of the next composer edit request. */
+	selectionEdit?: true;
 	annotation?: string;
 	status?: "changed" | "missing" | "renamed";
 }

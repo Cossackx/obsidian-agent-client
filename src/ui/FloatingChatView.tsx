@@ -53,7 +53,10 @@ function fitToViewport(
 	y: number,
 	width: number,
 	height: number,
-): { position: { x: number; y: number }; size: { width: number; height: number } } {
+): {
+	position: { x: number; y: number };
+	size: { width: number; height: number };
+} {
 	const size = clampSize(width, height);
 	const position = clampPosition(x, y, size.width, size.height);
 	return { position, size };
@@ -171,27 +174,28 @@ export class FloatingViewContainer implements IChatViewContainer {
 		this.containerEl.classList.remove("is-focused");
 	}
 
-	focus(): void {
+	async focus(owns = () => true): Promise<void> {
 		// Expand if collapsed, then focus
 		if (!this.isExpandedState) {
 			this.isExpandedState = true;
 			this.setExpanded?.(true);
 		}
 		// Focus after next render (expansion may need a frame)
-		window.requestAnimationFrame(() => {
-			const textarea = this.containerRefEl?.querySelector(
-				"textarea.agent-client-chat-input-textarea",
-			);
-			if (textarea instanceof HTMLTextAreaElement) {
-				textarea.focus();
-			}
-		});
+		await new Promise<void>((resolve) =>
+			window.requestAnimationFrame(() => resolve()),
+		);
+		if (!owns()) return;
+		const textarea = this.containerRefEl?.querySelector(
+			"textarea.agent-client-chat-input-textarea",
+		);
+		if (textarea instanceof HTMLTextAreaElement) textarea.focus();
 	}
 
 	hasFocus(): boolean {
 		return (
 			this.isExpandedState &&
-			(this.containerRefEl?.contains(activeDocument.activeElement) ?? false)
+			(this.containerRefEl?.contains(activeDocument.activeElement) ??
+				false)
 		);
 	}
 
@@ -350,8 +354,12 @@ function FloatingChatComponent({
 	// Keep refs up-to-date for viewport resize handler
 	const positionRef = useRef(position);
 	const sizeRef = useRef(size);
-	useEffect(() => { positionRef.current = position; }, [position]);
-	useEffect(() => { sizeRef.current = size; }, [size]);
+	useEffect(() => {
+		positionRef.current = position;
+	}, [position]);
+	useEffect(() => {
+		sizeRef.current = size;
+	}, [size]);
 
 	// Fit to viewport on expand, and re-fit whenever the viewport resizes
 	useEffect(() => {
@@ -364,10 +372,16 @@ function FloatingChatComponent({
 				sizeRef.current.width,
 				sizeRef.current.height,
 			);
-			if (newSize.width !== sizeRef.current.width || newSize.height !== sizeRef.current.height) {
+			if (
+				newSize.width !== sizeRef.current.width ||
+				newSize.height !== sizeRef.current.height
+			) {
 				setSize(newSize);
 			}
-			if (newPos.x !== positionRef.current.x || newPos.y !== positionRef.current.y) {
+			if (
+				newPos.x !== positionRef.current.x ||
+				newPos.y !== positionRef.current.y
+			) {
 				setPosition(newPos);
 			}
 		};

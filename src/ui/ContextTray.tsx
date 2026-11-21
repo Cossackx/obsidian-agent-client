@@ -745,7 +745,12 @@ export function ContextTray({
 										const role = event.target
 											.value as ContextItem["role"];
 										run(() =>
-											editItem(item.id, "role", { role }),
+											editItem(item.id, "role", {
+												role,
+												...(role === "destination" && {
+													selectionEdit: undefined,
+												}),
+											}),
 										);
 									}}
 								>

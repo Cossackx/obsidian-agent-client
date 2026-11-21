@@ -2,7 +2,7 @@
 
 Agent Client allows AI agents to edit files in your vault and working directory.
 
-[Note Companion](/usage/note-companion#place-a-reply-without-rewriting-it) adds a separate local editing flow. **Apply this change** approves only the reviewed Companion diff. It checks the saved before text and reports success only after reading back the expected result. Literal placement makes no model request; editorial requests generate proposals, not write approvals.
+[Note Companion](/usage/note-companion#place-a-reply-without-rewriting-it) has a separate local editing flow. **Insert in note…** places the text of that reply at a chosen destination without a model request. **Accept** on a proposed diff approves only that change; generating the proposal does not approve a write. The plugin checks the saved text before writing and reads it back before reporting success.
 
 ## How Editing Works
 
@@ -35,7 +35,7 @@ Permission options vary by agent. Some agents may not request permission at all 
 In **Settings → Agent Client → Permissions → Auto-allow permissions**, the plugin automatically chooses `allow_once` when offered. Otherwise the request still needs a decision.
 
 ::: warning
-Use with caution: automatically allowed requests do not get individual review. Agent tool access is independent of this setting and the context tray. Agents may also act without requesting ACP permission.
+Use with caution: automatically allowed requests do not get individual review. Composer chips and local note diffs do not restrict agent tool access. Agents may also act without requesting ACP permission.
 :::
 
 ## Viewing Changes
