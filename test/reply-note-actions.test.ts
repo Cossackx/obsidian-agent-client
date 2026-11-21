@@ -24,7 +24,7 @@ const apply = vi.fn(async (_id: string, proposal: NoteEditProposal) => ({
 	status: "verified" as const,
 }));
 
-it("inserts literal text from the original reply at an explicitly captured CRLF caret", async () => {
+it("appends literal text from the original reply to an explicitly chosen note end", async () => {
 	let select!: (value: LiteralTarget) => void;
 	const choice = new Promise<LiteralTarget>((resolve) => {
 		select = resolve;
@@ -41,25 +41,15 @@ it("inserts literal text from the original reply at an explicitly captured CRLF 
 	});
 	message.id = "latest";
 	message.content = [{ type: "text", text: "Don't insert" }];
-	select({
-		path,
-		kind: "caret",
-		text: "🌱\nroot",
-		range: { start: 3, end: 3 },
-	});
+	select({ path, kind: "end", stillTarget: () => true });
 	await expect(task).resolves.toMatchObject({ status: "verified" });
-	expect(apply).toHaveBeenLastCalledWith(
-		"s1",
-		expect.objectContaining({
-			sourceMessageId: "original",
-			before,
-			after: "🌱\r\n👋\r\nExactroot",
-		}),
-		expect.any(Function),
-	);
+	const [id, proposal] = apply.mock.lastCall!;
+	expect(id).toBe("s1");
+	expect(proposal).toMatchObject({ sourceMessageId: "original", before });
+	expect(proposal.after).toContain("👋\r\nExact");
 });
 
-it("never treats a selection as a caret or writes after an owner change during a note read", async () => {
+it("never writes after an owner change during a note read", async () => {
 	const write = vi.fn<typeof apply>();
 	const base = {
 		sessionId: "s1",
@@ -68,18 +58,6 @@ it("never treats a selection as a caret or writes after an owner change during a
 		current: () => true,
 		apply: write,
 	};
-	await expect(
-		insertReply({
-			...base,
-			destination: null,
-			choose: async () => ({
-				kind: "caret",
-				path,
-				text: before,
-				range: { start: 0, end: 2 },
-			}),
-		}),
-	).rejects.toThrow("cannot replace");
 	let live = true;
 	const choose = vi.fn(async () => null);
 	await insertReply({

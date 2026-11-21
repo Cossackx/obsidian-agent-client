@@ -13,14 +13,9 @@ export function bindReplyTarget(
 		app.vault.getAbstractFileByPath(path) === file;
 }
 
-export function chooseReplyTarget(
-	app: App,
-	caret?: Extract<LiteralTarget, { kind: "caret" }>,
-	onInvalid?: () => void,
-) {
+export function chooseReplyTarget(app: App, onInvalid?: () => void) {
 	return new Promise<LiteralTarget | null>((resolve) => {
 		const choices: LiteralTarget[] = [
-			...(caret ? [caret] : []),
 			...app.vault
 				.getMarkdownFiles()
 				.filter((file) => isNotePath(file.path))
@@ -35,9 +30,7 @@ export function chooseReplyTarget(
 				return choices;
 			}
 			getItemText(target: LiteralTarget) {
-				return target.kind === "caret"
-					? `Insert at captured cursor in ${target.path}`
-					: `Append to ${target.path}`;
+				return `Append to ${target.path}`;
 			}
 			onChooseItem(target: LiteralTarget) {
 				if (target.stillTarget && !target.stillTarget()) {

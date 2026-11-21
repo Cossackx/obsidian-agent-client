@@ -117,11 +117,12 @@ export function ComposerContext({
 					</span>
 					{detail.kind === "following" && (
 						<small>
-							{detail.followSelection
-								? "Includes the selected text as context, not the rest of the note. Following never enables editing: use Pin, Add selection or Suggest edit to selection. Unverified or truncated text requires review."
-								: "Includes the active note’s path, not its contents. Pin to capture the whole note."}{" "}
-							Removing it turns off following for this
-							conversation.
+							Follow shows the current note and sends only its
+							path. Pin to capture the whole note. To include a
+							passage, select it and use Ask XO about selection or
+							Add selection. Edits come from Suggest edit to
+							selection on a saved note. Removing this chip turns
+							off following for this conversation.
 						</small>
 					)}
 					{detail.annotation && (

@@ -2,16 +2,13 @@ import type { ChatMessage } from "../types/chat";
 import type {
 	DestinationAnchor,
 	NoteEditProposal,
-	TextRange,
 	WriteReceipt,
 } from "../types/note-companion";
-import { mapStoredRange } from "../utils/selection";
 import { planLiteralEdit } from "./note-edit-planner";
 
-export type LiteralTarget = (
-	| Exclude<DestinationAnchor, { kind: "range" }>
-	| { kind: "caret"; path: string; text: string; range: TextRange }
-) & { stillTarget?: () => boolean };
+export type LiteralTarget = Exclude<DestinationAnchor, { kind: "range" }> & {
+	stillTarget?: () => boolean;
+};
 
 export async function insertReply(input: {
 	sessionId: string;
@@ -43,8 +40,6 @@ export async function insertReply(input: {
 			: null;
 	const target: LiteralTarget | null = direct ?? (await choose());
 	if (!target || !current()) return;
-	if (target.kind === "caret" && target.range.start !== target.range.end)
-		throw new Error("Literal insertion cannot replace a selection.");
 	const stillTarget = direct
 		? input.bindTarget?.(direct)
 		: target.stillTarget;
@@ -54,7 +49,7 @@ export async function insertReply(input: {
 			"The destination note is no longer known. Choose the destination again in Note tools.",
 		);
 	// A path returned by the picker is not proof of what it offered.
-	if (!direct && target.kind !== "caret" && !stillTarget) return;
+	if (!direct && !stillTarget) return;
 	const checkTarget = () => {
 		if (stillTarget && !stillTarget())
 			throw new Error(
@@ -70,15 +65,9 @@ export async function insertReply(input: {
 	delete anchor.stillTarget;
 	const proposal = planLiteralEdit(
 		{ path: target.path, text, capturedAt: Date.now() },
-		anchor.kind === "caret"
-			? {
-					kind: "range",
-					path: anchor.path,
-					range: mapStoredRange(anchor.text, text, anchor.range),
-				}
-			: anchor,
+		anchor,
 		literal,
-		target.kind === "caret" ? "insert" : "append",
+		"append",
 		id,
 	);
 	return apply(

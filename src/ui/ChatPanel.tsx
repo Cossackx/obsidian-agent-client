@@ -15,10 +15,7 @@ import {
 
 import type { AttachedFile, ChatInputState, ChatMessage } from "../types/chat";
 import type { TranscriptSnapshot } from "../hooks/useAgentMessages";
-import {
-	CONTEXT_ONLY_NOTICE,
-	type NoteMetadata,
-} from "../services/vault-service";
+import type { NoteMetadata } from "../services/vault-service";
 import { isSameDirectory } from "../utils/platform";
 import {
 	computeSessionTitle,
@@ -579,10 +576,12 @@ export const ChatPanel = React.memo(function ChatPanel({
 					// Identity at selection time; Send/Accept must prove this same file.
 					// No path fallback: an unwitnessed passage stays frozen context only.
 					const file: unknown = selected;
+					// Without a verified file, Suggest edit stages exactly what Ask stages.
+					const staged = file instanceof TFile ? purpose : "ask";
 					const itemId = await stageCapturedSelection(
 						source,
 						range,
-						purpose,
+						staged,
 						check,
 						(change) =>
 							plugin.companionStorage.update(
@@ -597,7 +596,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 						selectionWitnesses.current.set(itemId, file);
 					if (ownsComposer())
 						new Notice(
-							purpose === "ask"
+							staged === "ask"
 								? "Selection added. Nothing was sent."
 								: "Edit request drafted. Nothing was sent.",
 						);
@@ -704,10 +703,6 @@ export const ChatPanel = React.memo(function ChatPanel({
 	const { chips: contextChips, following } = composerChips({
 		items: companion.state?.items ?? [],
 		activePath: followActivePath,
-		activeSelection: suggestions.mentions.activeNote?.selection && {
-			fromLine: suggestions.mentions.activeNote.selection.from.line + 1,
-			toLine: suggestions.mentions.activeNote.selection.to.line + 1,
-		},
 		followDismissed: companion.state?.followDismissed ?? false,
 	});
 	const followSuppressed = !!followActivePath && !following;
@@ -955,59 +950,6 @@ export const ChatPanel = React.memo(function ChatPanel({
 			});
 			const represented = representedItems(snapshot.items);
 			const captureNotices: string[] = [];
-			const selection = suggestions.mentions.activeNote?.selection;
-			// Identity bound when the selection was displayed, before any await.
-			const shown = selection?.file;
-			let followFresh: () => boolean | Promise<boolean> = () => true;
-			if (!turn && followOn && followActivePath && selection) {
-				let valid = false;
-				const matches = (
-					live: Awaited<
-						ReturnType<typeof vaultService.captureActiveSelection>
-					>,
-				) =>
-					!!live &&
-					!!shown &&
-					live.file === shown &&
-					shown.path === followActivePath &&
-					plugin.app.vault.getAbstractFileByPath(followActivePath) ===
-						shown &&
-					live.stillTarget?.() !== false &&
-					live.path === followActivePath &&
-					live.range.start === selection.range?.start &&
-					live.range.end === selection.range.end &&
-					live.text.slice(live.range.start, live.range.end) ===
-						selection.text;
-				try {
-					// Check that the note still exists, and use the actual editor
-					// selection where available (not the cached follow metadata).
-					await vaultService.readNote(followActivePath);
-					const live =
-						await vaultService.captureActiveSelection(true);
-					const original = live?.stillTarget;
-					// Final decision: same file AND the same selected range and bytes.
-					followFresh = async () =>
-						(!original || original()) &&
-						matches(
-							await vaultService.captureActiveSelection(true),
-						);
-					valid = matches(live);
-				} catch {
-					// An unverified capture is only eligible for explicit review.
-				}
-				if (!valid)
-					captureNotices.push(
-						`${followActivePath}: could not verify the followed selection; review the frozen excerpt.`,
-					);
-				if (selection.range && selection.text !== undefined)
-					represented.push({
-						path: followActivePath,
-						provenance: "following",
-						text: selection.text,
-						scope: { kind: "passage", range: selection.range },
-						positions: selection,
-					});
-			}
 			const mentionPaths = new Set(
 				extractMentionedNotes(content, vaultService).flatMap(
 					({ file }) =>
@@ -1051,11 +993,6 @@ export const ChatPanel = React.memo(function ChatPanel({
 						dispatched.current = true;
 					},
 					approvePayload: async (blocks, sources, notices) => {
-						// Re-check the followed selection at the actual dispatch decision.
-						if (followActivePath && !(await followFresh()))
-							captureNotices.push(
-								`${followActivePath}: the selected note changed or was removed; review the frozen excerpt.`,
-							);
 						const decision = decideSendReview({
 							sources,
 							represented,
@@ -2309,17 +2246,9 @@ export const ChatPanel = React.memo(function ChatPanel({
 							apply: (id, proposal, owns) =>
 								plugin.noteActions.apply(id, proposal, owns),
 							choose: async () => {
-								const caret =
-									await vaultService.captureActiveSelection(
-										true,
-									);
 								if (!current()) return null;
 								return chooseReplyTarget(
 									plugin.app,
-									caret &&
-										caret.range.start === caret.range.end
-										? { ...caret, kind: "caret" }
-										: undefined,
 									() =>
 										new Notice(
 											"The selected note moved or was replaced. Choose the destination again.",
@@ -2713,44 +2642,13 @@ export const ChatPanel = React.memo(function ChatPanel({
 		const sessionId = companion.state?.sessionId;
 		if (!sessionId || !ownsComposer()) return;
 		if (chip.kind === "following") {
-			const selection = suggestions.mentions.activeNote?.selection;
-			const captured = selection
-				? await vaultService.captureActiveSelection()
-				: null;
-			// A followed selection is context only; authority comes from this fresh capture.
-			const shown = selection?.file;
-			if (
-				selection &&
-				(!captured ||
-					(shown && captured.file && captured.file !== shown) ||
-					captured.path !== chip.path ||
-					!selection.range ||
-					captured.range.start !== selection.range.start ||
-					captured.range.end !== selection.range.end ||
-					captured.text.slice(
-						captured.range.start,
-						captured.range.end,
-					) !== selection.text)
-			)
-				throw new Error(
-					"Selection changed. Pin the current selection again.",
-				);
+			// Pin on Follow captures the whole note as frozen context, never a passage.
 			const itemId = crypto.randomUUID();
-			// Non-enumerable capture.file never persists; witnesses keep it live.
-			const source = captured ?? {
+			const source = {
 				path: chip.path,
 				text: await vaultService.readNote(chip.path),
 				capturedAt: Date.now(),
 			};
-			// Without affirmative capture evidence: frozen context, never an edit target.
-			const owned = captured?.file;
-			if (
-				owned &&
-				owned.path === captured.path &&
-				plugin.app.vault.getAbstractFileByPath(captured.path) === owned
-			)
-				selectionWitnesses.current.set(itemId, owned);
-			else if (captured) new Notice(CONTEXT_ONLY_NOTICE);
 			await guardedUpdate(
 				(old) =>
 					putItem(old, {
@@ -2758,9 +2656,7 @@ export const ChatPanel = React.memo(function ChatPanel({
 						source,
 						role: "working",
 						lifetime: "session",
-						scope: captured
-							? { kind: "passage", range: captured.range }
-							: { kind: "note" },
+						scope: { kind: "note" },
 					}),
 				`add:${crypto.randomUUID()}`,
 			);

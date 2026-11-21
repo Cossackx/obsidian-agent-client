@@ -34,7 +34,6 @@ export interface ComposerChip {
 	itemId?: string;
 	pinned: boolean;
 	selectionEdit?: true;
-	followSelection?: boolean;
 	annotation?: string;
 	status?: string;
 }
@@ -47,7 +46,6 @@ export interface ComposerChip {
 export function composerChips(input: {
 	items: readonly ContextItem[];
 	activePath?: string;
-	activeSelection?: { fromLine: number; toLine: number };
 	followDismissed: boolean;
 }): { chips: ComposerChip[]; following: boolean } {
 	const chips: ComposerChip[] = input.items
@@ -78,10 +76,7 @@ export function composerChips(input: {
 			kind: "following",
 			path: input.activePath,
 			pinned: false,
-			followSelection: !!input.activeSelection,
-			scope: input.activeSelection
-				? `following · selected lines ${input.activeSelection.fromLine}-${input.activeSelection.toLine}`
-				: "following active note · path only",
+			scope: "following active note · path only",
 		});
 	return { chips, following };
 }

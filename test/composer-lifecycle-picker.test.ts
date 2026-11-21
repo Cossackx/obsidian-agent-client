@@ -84,3 +84,15 @@ it("X13 stable picker preserves exact CRLF, Unicode and literal markup; rebuild 
 	).toMatchObject({ status: "undone" });
 	expect(bytes.get(original)).toBe(first);
 });
+
+it("R4 the reply Insert picker offers only explicit destinations, no captured-cursor row", () => {
+	const file = new TFile("Draft.md", "Draft");
+	const v = {
+		getMarkdownFiles: () => [file],
+		getAbstractFileByPath: (p: string) => (p === file.path ? file : null),
+	};
+	void chooseReplyTarget({ vault: v } as never);
+	const labels = m.opened!.getItems().map((i) => m.opened!.getItemText(i));
+	expect(labels).toEqual(["Append to Draft.md"]);
+	expect(labels.join(" ")).not.toMatch(/cursor|caret/i);
+});

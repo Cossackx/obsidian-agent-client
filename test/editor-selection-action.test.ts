@@ -4,6 +4,7 @@ import {
 	stageEditorSelection,
 	type SelectionStage,
 } from "../src/services/editor-selection-action";
+import { VaultService } from "../src/services/vault-service";
 
 const buffer = "Top\r\n😀 exact\r\nEnd";
 function fixture() {
@@ -111,4 +112,29 @@ it("stops if the target view has no registered composer", async () => {
 			() => true,
 		),
 	).rejects.toThrow(/open and focus the target conversation/i);
+});
+
+it("R5 unsubscribing the last view leaves no workspace or editor listener", () => {
+	const refs: object[] = [];
+	const on = vi.fn((name: string) => {
+		const ref = { name };
+		refs.push(ref);
+		return ref;
+	});
+	const offref = vi.fn((_ref: object) => undefined);
+	const app = {
+		vault: { getMarkdownFiles: () => [], on: () => ({}) },
+		workspace: { on, offref },
+	};
+	const svc = new VaultService({ app } as never);
+	const offA = svc.subscribeSelectionChanges(() => undefined);
+	const offB = svc.subscribeSelectionChanges(() => undefined);
+	expect(on.mock.calls.map(([name]) => name)).toEqual([
+		"active-leaf-change",
+		"file-open",
+	]);
+	offA();
+	expect(offref).not.toHaveBeenCalled();
+	offB();
+	expect(offref.mock.calls.map(([ref]) => ref)).toEqual(refs);
 });

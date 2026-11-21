@@ -25,11 +25,7 @@ import {
 } from "./services/companion-storage";
 import { renameNoteAssociation } from "./services/note-session-index";
 import { NoteActionService } from "./services/note-action-service";
-import {
-	CONTEXT_ONLY_NOTICE,
-	documentIsFile,
-	selectionTracking,
-} from "./services/vault-service";
+import { CONTEXT_ONLY_NOTICE, documentIsFile } from "./services/vault-service";
 import { isNotePath } from "./services/context-builder";
 import { ChatView, VIEW_TYPE_CHAT } from "./ui/ChatView";
 import {
@@ -473,8 +469,6 @@ export default class AgentClientPlugin extends Plugin {
 		this.app.workspace.detachLeavesOfType(VIEW_TYPE_CHAT);
 
 		this.registerView(VIEW_TYPE_CHAT, (leaf) => new ChatView(leaf, this));
-		// One selection listener on every editor state, from creation.
-		this.registerEditorExtension(selectionTracking);
 
 		this.app.workspace.detachLeavesOfType(VIEW_TYPE_SESSION_MANAGER);
 		this.registerView(

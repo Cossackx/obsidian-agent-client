@@ -3,7 +3,7 @@
  *
  * Unified service implementing IVaultAccess port for Obsidian's Vault API.
  * Combines vault file access, fuzzy search (formerly NoteMentionService),
- * and editor selection tracking into a single service.
+ * and explicit editor selection capture into a single service.
  */
 
 import type AgentClientPlugin from "../plugin";
@@ -13,8 +13,6 @@ import {
 	prepareFuzzySearch,
 	type EventRef,
 } from "obsidian";
-import { EditorView, type ViewUpdate } from "@codemirror/view";
-import { StateEffect, Transaction, type EditorState } from "@codemirror/state";
 import { getLogger, Logger } from "../utils/logger";
 import type { SourceSnapshot, TextRange } from "../types/note-companion";
 import { extractSelection, normalizeLineEndings } from "../utils/selection";
@@ -26,62 +24,12 @@ import {
 } from "../utils/wikilink-resolver";
 
 /**
- * A document generation: a token whose identity is its object. Its file is
- * bound at most once, and only on affirmative evidence; it is never reassigned.
- */
-type Generation = { file: TFile | null };
-/** Shared by every VaultService: one record per EditorState and per editor view. */
-const generations = new WeakMap<EditorState, Generation>();
-const viewGenerations = new WeakMap<object, Generation>();
-/** The state each editor showed at the last workspace notification. */
-const lastSeen = new WeakMap<object, EditorState>();
-const trackers = new Set<
-	(update: ViewUpdate, generation: Generation) => void
->();
-
-/**
- * The one selection listener, registered once by the plugin so every
- * EditorState carries it from creation. It decides each transaction's
- * generation once, before any panel sees it. A generation continues only
- * through a document-preserving transaction of the state its view last
- * showed; the user's own edit keeps the binding in a new token; any other
- * document change, an unseen state or a state swap mints an unbound token.
- * A retired generation can therefore never come back.
- */
-const trackUpdate = (update: ViewUpdate): void => {
-	const previous = generations.get(update.startState);
-	const continues =
-		!!previous && viewGenerations.get(update.view) === previous;
-	const userEdit = update.transactions.some(
-		(tr) => tr.annotation(Transaction.userEvent) !== undefined,
-	);
-	const generation =
-		continues && !update.docChanged
-			? previous
-			: { file: continues && userEdit ? previous.file : null };
-	generations.set(update.state, generation);
-	viewGenerations.set(update.view, generation);
-	for (const tracker of trackers) tracker(update, generation);
-};
-/** Registered once by the plugin (registerEditorExtension). */
-export const selectionTracking = EditorView.updateListener.of(trackUpdate);
-
-/** The generation the editor shows now; a reinstalled old state gets a new token. */
-function currentGeneration(cm: EditorView): Generation {
-	const known = generations.get(cm.state);
-	if (known && viewGenerations.get(cm) === known) return known;
-	const generation: Generation = { file: null };
-	generations.set(cm.state, generation);
-	viewGenerations.set(cm, generation);
-	return generation;
-}
-
-/**
  * Edit authority for an explicit capture (rule C, evidence ii): the editor's
  * whole current document equals the named file's current vault content and
  * the file is still the live object at its path. Line endings are normalised
- * because the editor holds LF. Residual: two distinct files with
- * byte-identical content during a load window are indistinguishable.
+ * because the editor holds LF. Residual: this is normalized-text equality, so
+ * two distinct files with identical content during a load window are
+ * indistinguishable.
  */
 export async function documentIsFile(
 	plugin: AgentClientPlugin,
@@ -233,32 +181,15 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 	private logger: Logger;
 	private vaultEventRefs: ReturnType<typeof this.plugin.app.vault.on>[] = [];
 
-	private currentSelection: {
-		filePath: string;
-		/** Editor file at the selection event; refresh carries it, never a path lookup. */
-		file?: TFile;
-		selection: NonNullable<NoteMetadata["selection"]>;
-		snapshot?: SourceSnapshot & { range: TextRange };
-		/** Emitting editor and its document generation; the witness dies with it. */
-		cm: EditorView;
-		generation: Generation;
-	} | null = null;
 	private selectionListeners = new Set<() => void>();
 	private activeLeafRef: EventRef | null = null;
 	private fileOpenRef: EventRef | null = null;
-	private tracker = (update: ViewUpdate, generation: Generation) =>
-		this.onEditorUpdate(update, generation);
-	private lastSelectionKey = "";
 
 	constructor(private plugin: AgentClientPlugin) {
 		// File index init
 		this.logger = getLogger();
 		this.rebuildIndex();
 		this.registerVaultEvents();
-
-		// Selection tracking init
-		this.currentSelection = null;
-		this.selectionListeners = new Set();
 	}
 
 	// ========================================================================
@@ -378,7 +309,7 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 	/**
 	 * Get the currently active note in the editor.
 	 *
-	 * Returns the active note with current selection if available.
+	 * Returns the active note's path only; Follow never carries a passage.
 	 *
 	 * @returns Promise resolving to active note metadata, or null if no note is active
 	 */
@@ -402,21 +333,6 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 		}
 
 		const metadata = this.convertToMetadata(activeFile);
-
-		// Add selection if we have it stored for this file
-		if (
-			this.currentSelection &&
-			this.witnessLive() &&
-			this.currentSelection.filePath === activeFile.path
-		) {
-			// Carry the file captured with the selection; a same-path occupant
-			// shows the original, so consumers see the mismatch and review.
-			metadata.selection = Object.defineProperty(
-				{ ...this.currentSelection.selection },
-				"file",
-				{ value: this.currentSelection.file },
-			);
-		}
 
 		return Promise.resolve(metadata);
 	}
@@ -484,20 +400,7 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 					})
 				: null;
 		}
-		if (allowCaret) return null;
-		const note = await this.getActiveNote();
-		const cached = this.currentSelection;
-		// A followed selection is context only: frozen, never edit authority.
-		return note &&
-			cached?.snapshot &&
-			this.witnessLive() &&
-			cached.file &&
-			cached.filePath === note.path &&
-			file === cached.file &&
-			this.plugin.app.vault.getAbstractFileByPath(cached.filePath) ===
-				cached.file
-			? { ...cached.snapshot }
-			: null;
+		return null;
 	}
 
 	/**
@@ -523,20 +426,21 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 	}
 
 	// ========================================================================
-	// Selection Tracking
+	// Active Note Tracking
 	// ========================================================================
 
 	/**
-	 * Subscribe to selection changes for the active markdown editor.
-	 *
-	 * The adapter will monitor the currently active MarkdownView and
-	 * keep track of its selection, notifying subscribers whenever the
-	 * selection or active file changes.
+	 * Subscribe to active-note changes (path only) so Follow stays current.
+	 * Selections are never tracked; explicit commands capture at call time.
 	 */
 	subscribeSelectionChanges(listener: () => void): () => void {
 		this.selectionListeners.add(listener);
-		this.ensureSelectionTracking();
-
+		if (!this.activeLeafRef) {
+			const workspace = this.plugin.app.workspace;
+			const notify = () => this.notifySelectionListeners();
+			this.activeLeafRef = workspace.on("active-leaf-change", notify);
+			this.fileOpenRef = workspace.on("file-open", notify);
+		}
 		return () => {
 			this.selectionListeners.delete(listener);
 			if (this.selectionListeners.size === 0) {
@@ -545,204 +449,12 @@ export class VaultService implements IVaultAccess, IWikilinkResolver {
 		};
 	}
 
-	private ensureSelectionTracking(): void {
-		if (this.activeLeafRef) {
-			return;
-		}
-
-		const workspace = this.plugin.app.workspace;
-		trackers.add(this.tracker);
-		this.onWorkspaceChange();
-		// Workspace signals only re-query; they never capture or bind.
-		this.activeLeafRef = workspace.on("active-leaf-change", () =>
-			this.onWorkspaceChange(),
-		);
-		this.fileOpenRef = workspace.on("file-open", () =>
-			this.onWorkspaceChange(),
-		);
-	}
-
 	private teardownSelectionTracking(): void {
-		trackers.delete(this.tracker);
 		for (const ref of [this.activeLeafRef, this.fileOpenRef]) {
 			if (ref) this.plugin.app.workspace.offref(ref);
 		}
 		this.activeLeafRef = null;
 		this.fileOpenRef = null;
-		this.lastSelectionKey = "";
-	}
-
-	/** The witness survives only while its editor still shows its generation. */
-	private witnessLive(): boolean {
-		const witness = this.currentSelection;
-		if (
-			witness &&
-			generations.get(witness.cm.state) === witness.generation &&
-			viewGenerations.get(witness.cm) === witness.generation
-		) {
-			// Unbound (still loading) shows nothing but may be bound later.
-			return witness.generation.file === witness.file;
-		}
-		this.currentSelection = null;
-		return false;
-	}
-
-	private onWorkspaceChange(): void {
-		this.lastSelectionKey = "none";
-		const view =
-			this.plugin.app.workspace.getActiveViewOfType(MarkdownView);
-		// WARNING: editor.cm is Obsidian's undocumented CodeMirror 6 handle.
-		const cm = (view?.editor as unknown as { cm?: EditorView } | undefined)
-			?.cm;
-		const file = view?.file;
-		if (view && file && cm?.state) {
-			const state = cm.state;
-			// Evidence (i): a new state installed since this editor was last seen.
-			const fresh = lastSeen.has(cm) && lastSeen.get(cm) !== state;
-			lastSeen.set(cm, state);
-			// The plugin registers the listener for every new state; a state that
-			// predates it gets the same shared extension.
-			if (!state.facet(EditorView.updateListener).includes(trackUpdate))
-				cm.dispatch({
-					effects: StateEffect.appendConfig.of(selectionTracking),
-				});
-			lastSeen.set(cm, cm.state);
-			const generation = currentGeneration(cm);
-			if (generation.file === null) {
-				if (fresh) this.bind(view, cm, generation, file, true);
-				// Evidence (ii) for an editor first seen now (cold start).
-				else
-					void documentIsFile(
-						this.plugin,
-						() => cm.state.doc.toString(),
-						file,
-					).then((owned) => {
-						if (owned && currentGeneration(cm) === generation)
-							this.bind(view, cm, generation, file, false);
-					});
-			}
-		}
-		this.notifySelectionListeners();
-	}
-
-	/**
-	 * Binds an unbound generation once. A load commit (i) also shows the range
-	 * made in that state; a cold match (ii) shows only later selections.
-	 */
-	private bind(
-		view: MarkdownView,
-		cm: EditorView,
-		generation: Generation,
-		file: TFile,
-		showExisting: boolean,
-	): void {
-		if (generation.file !== null || view.file !== file) return;
-		generation.file = file;
-		if (showExisting) this.showSelection(view, cm, generation);
-	}
-
-	private onEditorUpdate(update: ViewUpdate, generation: Generation): void {
-		if (!update.selectionSet && !update.docChanged) return;
-		const view =
-			this.plugin.app.workspace.getActiveViewOfType(MarkdownView);
-		const editor = view?.editor as unknown as
-			| { cm?: EditorView }
-			| undefined;
-		if (!view?.file || editor?.cm !== update.view) return;
-		this.showSelection(view, update.view, generation);
-	}
-
-	/** Witness only a selection on a generation bound to the view's file. */
-	private showSelection(
-		view: MarkdownView,
-		cm: EditorView,
-		generation: Generation,
-	): void {
-		const file = view.file;
-		if (!file) return;
-		const filePath = file.path;
-		const { doc, selection } = cm.state;
-		const { from, to } = selection.main;
-		if (
-			generation.file !== file ||
-			view.getMode() !== "source" ||
-			from === to
-		) {
-			const focused = (
-				view.editor as unknown as { hasFocus(): boolean }
-			).hasFocus();
-			if (generation.file !== file || from !== to || focused)
-				this.handleSelectionChange(filePath, null);
-			return;
-		}
-		const at = (pos: number): EditorPosition => {
-			const line = doc.lineAt(pos);
-			return { line: line.number - 1, ch: pos - line.from };
-		};
-		this.handleSelectionChange(
-			filePath,
-			{ from: at(from), to: at(to) },
-			doc.toString(),
-			file,
-			cm,
-			generation,
-		);
-	}
-
-	private handleSelectionChange(
-		filePath: string | null,
-		selection: { from: EditorPosition; to: EditorPosition } | null,
-		buffer?: string,
-		file?: TFile,
-		cm?: EditorView,
-		generation?: Generation,
-	): void {
-		const selectionKey = filePath
-			? selection
-				? `${filePath}:${selection.from.line}:${selection.from.ch}-${selection.to.line}:${selection.to.ch}`
-				: `${filePath}:none`
-			: "none";
-
-		if (
-			selectionKey === this.lastSelectionKey &&
-			buffer === this.currentSelection?.snapshot?.text &&
-			file === this.currentSelection?.file &&
-			cm === this.currentSelection?.cm
-		) {
-			return;
-		}
-
-		this.lastSelectionKey = selectionKey;
-
-		if (filePath && selection && cm && generation) {
-			const excerpt =
-				buffer === undefined
-					? undefined
-					: extractSelection(buffer, selection.from, selection.to);
-			this.currentSelection = {
-				filePath,
-				file,
-				cm,
-				generation,
-				selection: { ...selection, ...excerpt },
-				snapshot:
-					buffer !== undefined && excerpt
-						? {
-								path: filePath,
-								text: buffer,
-								range: excerpt.range,
-								capturedAt: Date.now(),
-							}
-						: undefined,
-			};
-		} else if (
-			this.currentSelection &&
-			(filePath === null || this.currentSelection.filePath === filePath)
-		) {
-			this.currentSelection = null;
-		}
-
-		this.notifySelectionListeners();
 	}
 
 	private notifySelectionListeners(): void {
