@@ -23,6 +23,7 @@ import { ComposerContext } from "../src/ui/ComposerContext";
 import { ReplyNoteActions } from "../src/ui/ReplyNoteActions";
 import { TFile, FileSystemAdapter } from "obsidian";
 import type { ChatMessage, PromptContent } from "../src/types/chat";
+import type { ContextItem } from "../src/types/note-companion";
 import type { SelectionOwner } from "../src/services/editor-selection-action";
 import {
 	fakeFile,
@@ -34,6 +35,16 @@ import {
 	type MenuRow,
 	type TreeElement,
 } from "./composer-lifecycle-helpers";
+type ModalButton = { onclick?: () => void; disabled?: boolean };
+type ModalElement = ModalButton & {
+	createEl: (tag: string, options?: { text?: string }) => ModalElement;
+	createDiv: () => ModalElement;
+	querySelector: () => null;
+	addClass: () => void;
+	setText: () => void;
+	focus: () => void;
+};
+type Dialog = { title: string; buttons: Map<string, ModalButton> };
 const m = vi.hoisted(() => ({
 	notice: vi.fn<(message: string) => void>(),
 	confirm: vi.fn<(...args: unknown[]) => Promise<boolean>>(),
@@ -42,10 +53,44 @@ const m = vi.hoisted(() => ({
 		| undefined,
 	picker: vi.fn<(...args: unknown[]) => unknown>(),
 	menu: [] as MenuRow[],
+	dialog: undefined as Dialog | undefined,
 }));
 vi.mock("obsidian", async (orig) => ({
 	...(await orig<object>()),
-	Modal: class {},
+	// DOM boundary only: the production modals create and handle their buttons.
+	Modal: class implements Dialog {
+		title = "";
+		buttons = new Map<string, ModalButton>();
+		contentEl = this.element();
+		private element(): ModalElement {
+			return {
+				createEl: (tag: string, options?: { text?: string }) => {
+					const el = this.element();
+					if (tag === "button" && options?.text)
+						this.buttons.set(options.text, el);
+					return el;
+				},
+				createDiv: () => this.element(),
+				querySelector: () => null,
+				addClass: () => {},
+				setText: () => {},
+				focus: () => {},
+			};
+		}
+		setTitle(title: string) {
+			this.title = title;
+		}
+		onOpen() {}
+		onClose() {}
+		open() {
+			m.dialog = this;
+			this.onOpen();
+		}
+		close() {
+			m.dialog = undefined;
+			this.onClose();
+		}
+	},
 	Plugin: class {},
 	PluginSettingTab: class {},
 	ItemView: class {},
@@ -124,6 +169,7 @@ beforeEach(() => {
 	m.confirm.mockReset().mockResolvedValue(false);
 	m.notice.mockClear();
 	m.menu.length = 0;
+	m.dialog = undefined;
 });
 afterEach(async () => {
 	const mounted = root;
@@ -132,7 +178,7 @@ afterEach(async () => {
 	vi.unstubAllGlobals();
 });
 
-type Capture = (allowCaret?: boolean) => Promise<unknown>;
+type Capture = VaultService["captureActiveSelection"];
 interface FakeVaultAccess {
 	getActiveNote: () => Promise<Record<string, unknown> | null>;
 	subscribeSelectionChanges: () => () => void;
@@ -154,6 +200,7 @@ interface MountOptions {
 	receipt?: boolean;
 	input?: boolean;
 	variant?: "sidebar" | "floating";
+	restoredItems?: ContextItem[];
 }
 type TrayProps = Parameters<typeof ContextTray>[0];
 
@@ -164,15 +211,20 @@ async function mount(opts: MountOptions = {}) {
 		failVerify = 0;
 	const adapter = {
 		exists: async (p: string) => p === "side" || files.has(p),
-		read: async (p: string) => {
+		read: vi.fn(async (p: string) => {
 			if (failVerify) {
 				failVerify--;
 				throw Error("transient verification error");
 			}
-			return files.get(p);
+			const text = files.get(p);
+			if (text === undefined) throw Error(`Missing sidecar ${p}`);
+			return text;
+		}),
+		mkdir: async () => {},
+		remove: async (p: string) => {
+			files.delete(p);
 		},
-		mkdir: noop,
-		write: async (p: string, t: string) => {
+		write: vi.fn(async (p: string, t: string) => {
 			if (failed) {
 				failed = false;
 				throw Error("test persistence failure");
@@ -182,10 +234,13 @@ async function mount(opts: MountOptions = {}) {
 				failVerify = verifyNext;
 				verifyNext = 0;
 			}
-		},
+		}),
 		list: async () => ({ files: [...files.keys()], folders: [] }),
 	};
-	const storage = new CompanionStorage(adapter as never, "side");
+	const storage = new CompanionStorage(adapter, "side");
+	const restoredItems = opts.restoredItems;
+	if (restoredItems)
+		await storage.update("A", (s) => ({ ...s, items: restoredItems }));
 	const prompt = vi.fn(async (_id: string, _blocks: PromptContent[]) => {}),
 		create = vi.fn(),
 		restart = vi.fn(),
@@ -416,6 +471,7 @@ async function mount(opts: MountOptions = {}) {
 		failVerify: (count = 1) => (verifyNext = count),
 		session,
 		readFail: () => (failed = true),
+		adapter,
 		storage,
 		wire,
 		prompt,
@@ -457,12 +513,15 @@ import { stageEditorSelection } from "../src/services/editor-selection-action";
 import { VaultService } from "../src/services/vault-service";
 import { MarkdownView } from "obsidian";
 import { NoteActionService } from "../src/services/note-action-service";
-function attachVault(h: Mounted) {
-	const original = fakeFile("Brief.md"),
-		other = fakeFile("Brief.md"),
+function attachVault(
+	h: Mounted,
+	original = fakeFile("Brief.md"),
+	text = "BODY",
+) {
+	const other = fakeFile(original.path),
 		data = new Map<TFile, string>([
-			[original, "BODY"],
-			[other, "BODY"],
+			[original, text],
+			[other, text],
 		]);
 	let present = original;
 	const v = Object.assign(h.plugin.app.vault, {
@@ -497,7 +556,7 @@ function attachVault(h: Mounted) {
 		plugin,
 	};
 }
-function wireRevision(h: Mounted, itemId: string) {
+function approveAndRespond(h: Mounted, result: unknown) {
 	m.confirm.mockResolvedValueOnce(true);
 	h.prompt.mockImplementationOnce(async (_, blocks) => {
 		const id = /"requestId":"([a-z0-9-]+)"/.exec(
@@ -508,10 +567,13 @@ function wireRevision(h: Mounted, itemId: string) {
 		h.chunk(
 			JSON.stringify({
 				requestId: id,
-				result: [{ itemId, original: "BODY", replacement: "EDIT" }],
+				result,
 			}),
 		);
 	});
+}
+function wireRevision(h: Mounted, itemId: string) {
+	approveAndRespond(h, [{ itemId, original: "BODY", replacement: "EDIT" }]);
 }
 function proposalActions(h: Mounted) {
 	const list = propsOf(h.output, MessageList);
@@ -835,3 +897,295 @@ it("X14 positive control: independently added passages can share a range but hav
 	expect(items).toHaveLength(2);
 	expect(items[0].id).not.toBe(items[1].id);
 });
+
+const literalReply: ChatMessage = {
+	id: "source-reply",
+	role: "assistant",
+	content: [{ type: "text", text: "Replacement" }],
+	timestamp: new Date(),
+};
+
+function openSourceEditor(
+	h: Mounted,
+	a: ReturnType<typeof attachVault>,
+	selection: Pick<typeof sel, "from" | "to"> = sel,
+) {
+	const view = Object.assign(
+		Object.create(MarkdownView.prototype) as object,
+		{
+			file: a.original,
+			getMode: () => "source",
+			editor: {
+				getValue: () => a.data.get(a.original)!,
+				listSelections: () => [
+					{ anchor: selection.from, head: selection.to },
+				],
+			},
+		},
+	);
+	Object.assign(h.plugin.app.workspace, {
+		getActiveFile: () => view.file,
+		getActiveViewOfType: () => view,
+		getLeavesOfType: () => [{ view }],
+	});
+	// Real capture reads this editor and retains its original TFile.
+	const service = Object.create(VaultService.prototype, {
+		plugin: { value: h.plugin },
+	}) as VaultService;
+	h.vaultAccess.captureActiveSelection = (allowCaret) =>
+		service.captureActiveSelection(allowCaret);
+}
+
+async function clickTray(h: Mounted, label: string) {
+	const button = findBtn(h.tray, label);
+	expect(button, label).toBeDefined();
+	expect(button?.disabled, label).not.toBe(true);
+	await act(async () => button!.onClick());
+}
+
+async function clickDialog(label: string) {
+	const button = m.dialog?.buttons.get(label);
+	expect(button?.onclick, `${m.dialog?.title}: ${label}`).toBeTypeOf(
+		"function",
+	);
+	expect(button?.disabled, label).not.toBe(true);
+	await act(async () => button!.onclick!());
+}
+
+async function acceptOfferedEdit(h: Mounted) {
+	const actions = proposalActions(h);
+	expect(actions?.proposals).toHaveLength(1);
+	await act(async () => actions!.onAccept(actions!.proposals[0].proposal));
+}
+
+it.each(["stable", "before note choice", "during heading choice"])(
+	"F1 section editorial retains the offered file: %s",
+	async (mode) => {
+		const before = "# Plan\nBODY\n";
+		const h = await mount({ tools: true, messages: [literalReply] });
+		const a = attachVault(h, fakeFile("Brief.md"), before);
+		openSourceEditor(h, a);
+		await act(async () => h.row.onTools());
+		await clickTray(h, "Choose destination");
+		expect(m.dialog?.title).toBe("Pick a destination note");
+		if (mode === "before note choice") a.swap();
+		await clickDialog("Brief.md");
+		if (mode !== "before note choice" || m.dialog) {
+			expect(m.dialog?.title).toBe("Placement in Brief.md");
+			if (mode === "during heading choice") a.swap();
+			await clickDialog("Plan · 1");
+		}
+		approveAndRespond(h, { path: "Brief.md", markdown: "EDIT" });
+		await clickTray(h, "Merge into section");
+		expect(a.v.process).not.toHaveBeenCalled();
+		// Accept an offered diff even in the swap cases: the old path offers one.
+		if (mode === "stable" || proposalActions(h)?.proposals.length)
+			await acceptOfferedEdit(h);
+		expect(a.data.get(a.other)).toBe(before);
+		expect(a.data.get(a.original)).toBe(
+			mode === "stable" ? "# Plan\nEDIT\n" : before,
+		);
+		if (mode === "stable") {
+			expect(m.confirm).toHaveBeenCalledTimes(1);
+			expect(a.v.process).toHaveBeenCalledExactlyOnceWith(
+				a.original,
+				expect.any(Function),
+			);
+			expect((await load(h)).operations[0]?.receipt.status).toBe(
+				"verified",
+			);
+		} else {
+			expect(a.v.process).not.toHaveBeenCalled();
+			expect(h.prompt).not.toHaveBeenCalled();
+		}
+	},
+);
+
+it.each([false, true])(
+	"F2 literal preview writes only on Apply to the captured file: swap=%s",
+	async (swap) => {
+		const before = "Keep BODY here.\n";
+		const h = await mount({ tools: true, messages: [literalReply] });
+		const a = attachVault(h, fakeFile("Brief.md"), before);
+		openSourceEditor(h, a, {
+			from: { line: 0, ch: 5 },
+			to: { line: 0, ch: 9 },
+		});
+		await act(async () => h.row.onTools());
+		await clickTray(h, "Capture destination selection");
+		await clickTray(h, "Replace · preview");
+		expect(m.dialog?.title).toBe("Review note change");
+		expect(a.v.process).not.toHaveBeenCalled();
+		expect([...a.data.values()]).toEqual([before, before]);
+		if (swap) a.swap();
+		await clickDialog("Apply this change");
+		expect(a.data.get(a.other)).toBe(before);
+		expect(a.data.get(a.original)).toBe(
+			swap ? before : "Keep Replacement here.\n",
+		);
+		if (swap) expect(a.v.process).not.toHaveBeenCalled();
+		else {
+			expect(a.v.process).toHaveBeenCalledExactlyOnceWith(
+				a.original,
+				expect.any(Function),
+			);
+			expect((await load(h)).operations[0]?.receipt.status).toBe(
+				"verified",
+			);
+		}
+	},
+);
+
+it.each(["live pin", "fileless registered stage", "restored"])(
+	"F3 passage review requires its original file witness: %s",
+	async (mode) => {
+		const original = fakeFile("Brief.md");
+		const path = original.path;
+		const source = { path, text: "BODY", capturedAt: 1 };
+		const livePin = mode === "live pin";
+		const h = await mount({
+			tools: true,
+			follow: livePin,
+			active: {
+				selection: Object.defineProperty({ ...sel }, "file", {
+					value: original,
+				}),
+			},
+			restoredItems:
+				mode === "restored"
+					? [
+							{
+								id: "restored-passage",
+								source,
+								scope: { kind: "passage", range: sel.range },
+								role: "working",
+								lifetime: "session",
+							},
+						]
+					: undefined,
+		});
+		const a = attachVault(h, original);
+		openSourceEditor(h, a);
+		if (livePin) {
+			const capture = await h.vaultAccess.captureActiveSelection!();
+			expect(capture?.file).toBe(original);
+			expect(h.row.chips[0]?.kind).toBe("following");
+			await act(async () => h.row.onTogglePin(h.row.chips[0]));
+		} else if (mode === "fileless registered stage") {
+			a.swap();
+			// Exercise the registered boundary, not a fileless native editor event.
+			await act(async () =>
+				h.native.stage(source, sel.range, "suggest-edit", noop),
+			);
+		}
+		const { items } = await load(h);
+		expect(items).toHaveLength(1);
+		expect(items[0].scope).toEqual({ kind: "passage", range: sel.range });
+		expect(items[0].source).not.toHaveProperty("file");
+		expect(h.prompt).not.toHaveBeenCalled();
+		wireRevision(h, items[0].id);
+		if (mode === "fileless registered stage") {
+			await act(async () => h.input.onSendMessage(h.input.inputValue));
+			// The guarded Send can refuse early. If it offers a diff, test Accept.
+			if (proposalActions(h)?.proposals.length)
+				await acceptOfferedEdit(h);
+		} else {
+			await act(async () => h.row.onTools());
+			await clickTray(h, "Review passages");
+			expect(h.prompt).toHaveBeenCalledTimes(1);
+			expect(a.v.process).not.toHaveBeenCalled();
+			await acceptOfferedEdit(h);
+		}
+		expect(a.data.get(a.other)).toBe("BODY");
+		expect(a.data.get(original)).toBe(livePin ? "EDIT" : "BODY");
+		if (livePin) {
+			expect((await load(h)).operations[0]?.receipt.status).toBe(
+				"verified",
+			);
+		} else expect(a.v.process).not.toHaveBeenCalled();
+		if (mode === "fileless registered stage") {
+			expect(h.input.inputValue).not.toBe("");
+			expect(h.prompt).not.toHaveBeenCalled();
+			expect(m.notice.mock.calls.flat().join(" ")).toContain(
+				"no longer known",
+			);
+		}
+	},
+);
+
+async function dropMarkdown(h: Mounted, path: string) {
+	Object.assign(h.plugin.app.dragManager, {
+		draggable: { type: "file", file: fakeFile(path) },
+	});
+	const dropTarget = search(
+		h.actualInput,
+		(e) => typeof e.props.onDrop === "function",
+	);
+	const preventDefault = vi.fn();
+	const event = { dataTransfer: { files: [] }, preventDefault };
+	// The rendered handler uses only these fields of the browser event.
+	const onDrop = dropTarget?.props.onDrop as
+		| ((e: typeof event) => void)
+		| undefined;
+	expect(onDrop).toBeTypeOf("function");
+	await act(async () => onDrop!(event));
+	expect(preventDefault).toHaveBeenCalledTimes(1);
+}
+
+it.each(["initial read error", "independent readback", "clean acknowledgment"])(
+	"F5 retry never resurrects an older drop after successor removal: %s",
+	async (mode) => {
+		let text = "FIRST";
+		const h = await mount({
+			input: true,
+			read: async (path) => (path === "Brief.md" ? text : "OTHER"),
+		});
+		if (mode === "initial read error") {
+			// Open a real, empty sidecar on the first drop.
+			await act(async () => h.storage.update("A", (s) => s));
+			h.adapter.read.mockRejectedValueOnce(Error("opening sidecar"));
+		} else h.readFail();
+		h.adapter.write.mockClear();
+		await dropMarkdown(h, "Brief.md");
+		expect(findBtn(h.output, "Retry local save or load")).toBeDefined();
+		expect(h.adapter.write).toHaveBeenCalledTimes(
+			mode === "initial read error" ? 0 : 1,
+		);
+		expect((await h.storage.load("A"))?.items ?? []).toEqual([]);
+		text = "SECOND";
+		h.adapter.read.mockClear();
+		h.adapter.write.mockClear();
+		if (mode === "independent readback") h.failVerify();
+		await dropMarkdown(h, "Brief.md");
+		if (mode === "independent readback") {
+			// Observe the production independent readback before the test performs any load.
+			expect(h.adapter.write).toHaveBeenCalledTimes(1);
+			const [target, raw] = h.adapter.write.mock.calls[0];
+			const [verify, readback] = h.adapter.read.mock.results;
+			expect(h.adapter.read.mock.calls).toEqual([[target], [target]]);
+			await expect(verify.value).rejects.toThrow(
+				"transient verification error",
+			);
+			await expect(readback.value).resolves.toBe(raw);
+		}
+		const second = (await load(h)).items;
+		expect(second.map((item) => item.source.text)).toEqual(["SECOND"]);
+		if (mode === "independent readback") await dropMarkdown(h, "Other.md");
+		const chip = h.row.chips.find((row) => row.itemId === second[0].id);
+		expect(chip?.path).toBe("Brief.md");
+		await act(async () => h.row.onRemove(chip!));
+		const expected =
+			mode === "independent readback" ? [["Other.md", "OTHER"]] : [];
+		const durable = async () =>
+			(await load(h)).items.map(({ source }) => [
+				source.path,
+				source.text,
+			]);
+		expect(await durable()).toEqual(expected);
+		const retry = findBtn(h.output, "Retry local save or load");
+		expect(retry).toBeDefined();
+		await act(async () => retry!.onClick());
+		expect(await durable()).toEqual(expected);
+		expect(findBtn(h.output, "Retry local save or load")).toBeUndefined();
+	},
+);

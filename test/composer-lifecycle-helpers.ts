@@ -3,7 +3,11 @@ import { TFile } from "obsidian";
 
 /** Shared typed scaffolding for the composer lifecycle regression tests. */
 export type TreeElement = ReactElement<Record<string, unknown>>;
-export type ButtonProps = { onClick: () => unknown; children?: unknown };
+export type ButtonProps = {
+	onClick: () => unknown;
+	children?: unknown;
+	disabled?: boolean;
+};
 export type MenuRow = {
 	title?: string;
 	click?: () => void;
@@ -51,8 +55,18 @@ export function propsOf<P>(tree: unknown, type: JSXElementConstructor<P>): P {
 }
 
 export const findBtn = (tree: unknown, label: string) =>
-	search(tree, (x) => x.type === "button" && x.props.children === label)
-		?.props as ButtonProps | undefined;
+	search(tree, (x) => {
+		const { children } = x.props;
+		return (
+			x.type === "button" &&
+			(children === label ||
+				(Array.isArray(children) &&
+					children.every(
+						(part: unknown) => typeof part === "string",
+					) &&
+					children.join("") === label))
+		);
+	})?.props as ButtonProps | undefined;
 
 export const fakeFile = (path: string, size = 10) =>
 	Object.assign(new TFile(path, path.split(".")[0]), {
