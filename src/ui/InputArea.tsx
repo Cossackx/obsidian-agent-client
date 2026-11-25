@@ -34,6 +34,7 @@ import { getVaultDragFiles, mimeTypeFromExtension } from "../utils/vault-drag";
 import type { ErrorInfo } from "../types/errors";
 import type { AgentUpdateNotification } from "../services/update-checker";
 import { useSettings } from "../hooks/useSettings";
+import { useVoice } from "../hooks/useVoice";
 
 // ============================================================================
 // Image Constants
@@ -230,6 +231,8 @@ export interface InputAreaProps {
 		content: string,
 		attachments?: AttachedFile[],
 	) => Promise<boolean | void>;
+	/** Voice-chat turn: same send path, but leaves the typed draft and staged files alone. */
+	onVoiceSend: (content: string) => Promise<void>;
 	/** Callback to stop the current generation */
 	onStopGeneration: () => Promise<void>;
 	/** Session mode state (available modes and current mode) */
@@ -302,6 +305,7 @@ export function InputArea({
 	plugin,
 	view,
 	onSendMessage,
+	onVoiceSend,
 	onStopGeneration,
 	modes,
 	onModeChange,
@@ -348,6 +352,15 @@ export function InputArea({
 	);
 
 	// Refs
+	const voice = useVoice({
+		plugin,
+		textareaRef,
+		inputValue,
+		onInputChange,
+		onSendMessage: onVoiceSend,
+		onStopGeneration,
+		messages,
+	});
 
 	const dragCounterRef = useRef(0);
 
@@ -1220,6 +1233,11 @@ export function InputArea({
 					onConfigOptionChange={onConfigOptionChange}
 					usage={usage}
 					isSessionReady={isSessionReady}
+					hiddenConfigOptionIds={settings.hiddenConfigOptionIds}
+					voice={{
+						...voice,
+						canSend: isSessionReady && !isSending,
+					}}
 				/>
 			</div>
 		</div>

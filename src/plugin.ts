@@ -4,6 +4,7 @@ import {
 	Notice,
 	requestUrl,
 	MarkdownRenderChild,
+	Platform,
 	type MarkdownPostProcessorContext,
 	TFile,
 	MarkdownView,
@@ -69,6 +70,12 @@ import {
 	xyPoint,
 } from "./services/settings-normalizer";
 import { PRESET_AGENTS } from "./services/preset-agents";
+import {
+	VoiceHelper,
+	resolveHermesRuntime,
+	type HermesRuntime,
+} from "./services/voice-helper";
+import { getEnhancedWindowsEnv, prepareShellCommand } from "./utils/platform";
 import {
 	getAvailableAgentsFromSettings,
 	getAllAgentsFromSettings,
@@ -197,6 +204,18 @@ export interface AgentClientPluginSettings {
 	floatingWindowSize: { width: number; height: number };
 	floatingWindowPosition: { x: number; y: number } | null;
 	floatingButtonPosition: { x: number; y: number } | null;
+	/** Agent config options (by ACP config id) not shown in the composer toolbar */
+	hiddenConfigOptionIds: string[];
+	/** Dictation and voice chat through the Hermes voice helper */
+	voice: {
+		enabled: boolean;
+		/** Mic level (RMS, 0-1) at or above which the user counts as speaking */
+		silenceThreshold: number;
+		/** Pause length (ms) that ends a voice-chat turn */
+		silenceMs: number;
+		/** Speaking over a spoken reply interrupts it */
+		bargeIn: boolean;
+	};
 }
 
 const DEFAULT_SETTINGS: AgentClientPluginSettings = {
@@ -256,6 +275,13 @@ const DEFAULT_SETTINGS: AgentClientPluginSettings = {
 	floatingWindowSize: { width: 400, height: 500 },
 	floatingWindowPosition: null,
 	floatingButtonPosition: null,
+	hiddenConfigOptionIds: ["service_tier"],
+	voice: {
+		enabled: true,
+		silenceThreshold: 0.02,
+		silenceMs: 1200,
+		bargeIn: true,
+	},
 };
 
 export default class AgentClientPlugin extends Plugin {
@@ -295,6 +321,11 @@ export default class AgentClientPlugin extends Plugin {
 	private floatingChatCounter = 0;
 	/** Guards against concurrent embed-id injection for the same block. */
 	private embedIdInjectionInFlight = new Set<string>();
+	/** Shared Hermes voice helper; started lazily by the first chat view that needs it */
+	voiceHelper = new VoiceHelper(() => this.resolveVoiceRuntime(), {
+		log: (...a: unknown[]) => getLogger().log(...a),
+		error: (...a: unknown[]) => getLogger().error(...a),
+	});
 
 	private selectionHandlers = new Map<
 		string,
@@ -690,7 +721,36 @@ export default class AgentClientPlugin extends Plugin {
 		);
 	}
 
+	/**
+	 * Ask the configured Hermes launcher for its own Python + checkout, so the
+	 * voice helper never depends on whatever python/PYTHONPATH is on PATH.
+	 */
+	private resolveVoiceRuntime(): Promise<HermesRuntime> {
+		if (Platform.isWin && this.settings.windowsWslMode) {
+			return Promise.reject(
+				new Error("Voice isn't available when agents run in WSL."),
+			);
+		}
+		const command =
+			this.settings.presetAgents["hermes-agent"]?.command.trim() ||
+			"hermes";
+		const prepared = prepareShellCommand(
+			command,
+			["--print-runtime-command"],
+			"",
+			{ wslMode: false },
+		);
+		const env = getEnhancedWindowsEnv({ ...process.env });
+		delete env.PYTHONPATH;
+		return resolveHermesRuntime(prepared.command, prepared.args, {
+			shell: prepared.needsShell,
+			env,
+		});
+	}
+
 	onunload() {
+		this.voiceHelper.dispose();
+
 		// Unmount floating button
 		this.floatingButton?.unmount();
 		this.floatingButton = null;
@@ -1853,6 +1913,24 @@ export default class AgentClientPlugin extends Plugin {
 			})(),
 			floatingWindowPosition: xyPoint(raw.floatingWindowPosition),
 			floatingButtonPosition: xyPoint(raw.floatingButtonPosition),
+			hiddenConfigOptionIds: Array.isArray(raw.hiddenConfigOptionIds)
+				? raw.hiddenConfigOptionIds.filter(
+						(id): id is string => typeof id === "string",
+					)
+				: D.hiddenConfigOptionIds,
+			voice: (() => {
+				const rv = obj(raw.voice) ?? {};
+				return {
+					enabled: bool(rv.enabled, D.voice.enabled),
+					silenceThreshold: num(
+						rv.silenceThreshold,
+						D.voice.silenceThreshold,
+						0.001,
+					),
+					silenceMs: num(rv.silenceMs, D.voice.silenceMs, 200),
+					bargeIn: bool(rv.bargeIn, D.voice.bargeIn),
+				};
+			})(),
 		};
 
 		this.ensureAtLeastOneEnabled();

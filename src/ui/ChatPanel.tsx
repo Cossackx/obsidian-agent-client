@@ -2855,6 +2855,9 @@ export const ChatPanel = React.memo(function ChatPanel({
 			plugin={plugin}
 			view={viewHost}
 			onSendMessage={handleSendMessageWithGeminiDismiss}
+			onVoiceSend={async (text) => {
+				await sendWithCompanion(text, undefined, undefined, true);
+			}}
 			onStopGeneration={handleStopGeneration}
 			modes={session.modes}
 			onModeChange={(modeId) => void handleSetMode(modeId)}

@@ -14,6 +14,10 @@
 
 import { parse as parseYamlImpl } from "yaml";
 
+/** UI stand-ins for render tests of components that import them. */
+export function setIcon(): void {}
+export class Menu {}
+
 export const Platform = {
 	isWin: false,
 	isMacOS: false,

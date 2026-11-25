@@ -283,6 +283,7 @@ async function mount(opts: MountOptions = {}) {
 			fontSize: null,
 		},
 		autoMentionActiveNote: !!opts.follow,
+		voice: { enabled: false },
 		presetAgents: {},
 		customAgents: [],
 		savedSessions: [],
@@ -305,6 +306,7 @@ async function mount(opts: MountOptions = {}) {
 		getConfig: () => false,
 		readBinary: opts.readBinary ?? noop,
 	};
+	const VOICE_OFF = { state: "off" }; // stable snapshot for useSyncExternalStore
 	const plugin = {
 		app: {
 			vault,
@@ -332,6 +334,8 @@ async function mount(opts: MountOptions = {}) {
 		},
 		checkForUpdates: async () => false,
 		registerPendingPromptHandler: () => noop,
+		// Voice off: the composer renders without starting the helper.
+		voiceHelper: { subscribe: () => noop, getStatus: () => VOICE_OFF },
 	};
 	let enqueue: UseAgentMessagesReturn["enqueueUpdate"] | undefined,
 		messagesAPI: UseAgentMessagesReturn | undefined;
@@ -1382,6 +1386,15 @@ it("R2 an unverified Suggest edit stages Ask's plain context and an ordinary que
 	await act(async () => h.input.onSendMessage("what does it mean?"));
 	expect(h.prompt).toHaveBeenCalledTimes(1);
 	expect(JSON.stringify(h.prompt.mock.calls)).toContain("what does it mean?");
+});
+
+it("V1 a voice-chat turn sends through the companion path and keeps the typed draft", async () => {
+	const h = await mount();
+	await act(async () => h.input.onInputChange("typed draft"));
+	await act(async () => h.input.onVoiceSend("spoken question"));
+	expect(h.prompt).toHaveBeenCalledTimes(1);
+	expect(JSON.stringify(h.prompt.mock.calls)).toContain("spoken question");
+	expect(h.input.inputValue).toBe("typed draft");
 });
 
 it("R3 explicit capture on a saved settled note keeps edit authority and Accept verifies", async () => {

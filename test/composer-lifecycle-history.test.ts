@@ -229,6 +229,7 @@ async function mount(opts: MountOptions = {}) {
 			fontSize: null,
 		},
 		autoMentionActiveNote: !!opts.follow,
+		voice: { enabled: false },
 		presetAgents: {},
 		sessionHistoryFilters: { currentVaultOnly: true, hideNonLocal: false },
 		customAgents: [],
@@ -256,6 +257,7 @@ async function mount(opts: MountOptions = {}) {
 		getConfig: () => false,
 		readBinary: opts.readBinary ?? noop,
 	};
+	const VOICE_OFF = { state: "off" }; // stable snapshot for useSyncExternalStore
 	const plugin = {
 		app: {
 			vault,
@@ -283,6 +285,8 @@ async function mount(opts: MountOptions = {}) {
 		},
 		checkForUpdates: async () => false,
 		registerPendingPromptHandler: () => noop,
+		// Voice off: the composer renders without starting the helper.
+		voiceHelper: { subscribe: () => noop, getStatus: () => VOICE_OFF },
 	};
 	let enqueue: UseAgentMessagesReturn["enqueueUpdate"] | undefined,
 		messagesAPI: UseAgentMessagesReturn | undefined;

@@ -9,6 +9,7 @@ import {
 	type SessionConfigOption,
 	type SessionConfigSelectGroup,
 } from "../types/session";
+import { VoiceControls, type VoiceControlsProps } from "./VoiceControls";
 
 // ============================================================================
 // ToolbarDropdown — themed dropdown using Obsidian's Menu
@@ -155,6 +156,9 @@ export interface InputToolbarProps {
 	onConfigOptionChange?: (configId: string, value: string) => void;
 	usage?: SessionUsage;
 	isSessionReady: boolean;
+	/** Config option ids the user chose not to show (e.g. Hermes's service_tier) */
+	hiddenConfigOptionIds?: readonly string[];
+	voice?: VoiceControlsProps;
 }
 
 export function InputToolbar({
@@ -168,6 +172,8 @@ export function InputToolbar({
 	onConfigOptionChange,
 	usage,
 	isSessionReady,
+	hiddenConfigOptionIds = [],
+	voice,
 }: InputToolbarProps) {
 	const sendButtonRef = useRef<HTMLButtonElement>(null);
 
@@ -251,6 +257,7 @@ export function InputToolbar({
 					// boolean options (ACP 0.28+) are carried as data but
 					// not yet rendered; only select options get a dropdown.
 					if (option.type !== "select") return null;
+					if (hiddenConfigOptionIds.includes(option.id)) return null;
 					const flatOptions = flattenConfigSelectOptions(
 						option.options,
 					);
@@ -322,6 +329,8 @@ export function InputToolbar({
 						)}
 				</>
 			)}
+
+			{voice && <VoiceControls {...voice} />}
 
 			{/* Send/Stop Button */}
 			<button

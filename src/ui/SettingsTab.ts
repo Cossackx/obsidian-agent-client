@@ -11,6 +11,7 @@ import {
 	setIcon,
 } from "obsidian";
 import type AgentClientPlugin from "../plugin";
+import type { AgentClientPluginSettings } from "../plugin";
 import type {
 	CustomAgentSettings,
 	PresetAgentUserSettings,
@@ -480,6 +481,92 @@ export class AgentClientSettingTab extends PluginSettingTab {
 					.onChange(async (value) => {
 						await this.plugin.settingsService.updateSettings({
 							floatingButtonImage: value.trim(),
+						});
+					}),
+			);
+
+		// ─────────────────────────────────────────────────────────────────────
+		// Voice
+		// ─────────────────────────────────────────────────────────────────────
+
+		new Setting(containerEl).setName("Voice").setHeading();
+
+		const voice = () => this.plugin.settings.voice;
+		const setVoice = (patch: Partial<AgentClientPluginSettings["voice"]>) =>
+			this.plugin.settingsService.updateSettings({
+				voice: { ...voice(), ...patch },
+			});
+
+		new Setting(containerEl)
+			.setName("Enable voice")
+			.setDesc(
+				"Show the dictate and voice chat buttons in the composer. Speech is transcribed and spoken by the Hermes agent using its own voice settings; no API key is stored in this plugin.",
+			)
+			.addToggle((toggle) =>
+				toggle.setValue(voice().enabled).onChange(async (value) => {
+					await setVoice({ enabled: value });
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName("Speech threshold")
+			.setDesc(
+				"Microphone level that counts as speaking in voice chat. Raise it if background noise keeps a turn from ending; lower it if quiet speech is missed. Default 0.02.",
+			)
+			.addText((text) =>
+				text
+					.setPlaceholder("0.02")
+					.setValue(String(voice().silenceThreshold))
+					.onChange(async (value) => {
+						const n = parseFloat(value);
+						if (n > 0 && n < 1)
+							await setVoice({ silenceThreshold: n });
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Pause before sending (ms)")
+			.setDesc(
+				"How long you must stay silent before a voice chat turn is sent. Default 1200.",
+			)
+			.addText((text) =>
+				text
+					.setPlaceholder("1200")
+					.setValue(String(voice().silenceMs))
+					.onChange(async (value) => {
+						const n = parseInt(value, 10);
+						if (n >= 200) await setVoice({ silenceMs: n });
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Interrupt by speaking")
+			.setDesc(
+				"Speaking while a reply is read aloud stops it and starts your next turn. Turn off if speaker echo cuts replies short.",
+			)
+			.addToggle((toggle) =>
+				toggle.setValue(voice().bargeIn).onChange(async (value) => {
+					await setVoice({ bargeIn: value });
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName("Hidden toolbar options")
+			.setDesc(
+				"Agent option ids to hide from the composer toolbar, comma-separated. The default hides the service tier menu from the Hermes agent. Clear the field to show it again.",
+			)
+			.addText((text) =>
+				text
+					.setPlaceholder("Option ids")
+					.setValue(
+						this.plugin.settings.hiddenConfigOptionIds.join(", "),
+					)
+					.onChange(async (value) => {
+						await this.plugin.settingsService.updateSettings({
+							hiddenConfigOptionIds: value
+								.split(",")
+								.map((s) => s.trim())
+								.filter(Boolean),
 						});
 					}),
 			);
