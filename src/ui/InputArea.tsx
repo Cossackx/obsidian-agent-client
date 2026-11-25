@@ -34,6 +34,7 @@ import { getVaultDragFiles, mimeTypeFromExtension } from "../utils/vault-drag";
 import type { ErrorInfo } from "../types/errors";
 import type { AgentUpdateNotification } from "../services/update-checker";
 import { useSettings } from "../hooks/useSettings";
+import { useVoice } from "../hooks/useVoice";
 
 // ============================================================================
 // Image Constants
@@ -343,6 +344,15 @@ export function InputArea({
 
 	// Refs
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
+	const voice = useVoice({
+		plugin,
+		textareaRef,
+		inputValue,
+		onInputChange,
+		onSendMessage,
+		onStopGeneration,
+		messages,
+	});
 	const dragCounterRef = useRef(0);
 
 	// Clear attached files when agent changes
@@ -1254,6 +1264,11 @@ export function InputArea({
 					onConfigOptionChange={onConfigOptionChange}
 					usage={usage}
 					isSessionReady={isSessionReady}
+					hiddenConfigOptionIds={settings.hiddenConfigOptionIds}
+					voice={{
+						...voice,
+						canSend: isSessionReady && !isSending,
+					}}
 				/>
 			</div>
 		</div>

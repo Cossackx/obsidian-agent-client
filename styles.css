@@ -1249,6 +1249,75 @@ If your plugin does not need CSS, delete this file.
 	font-weight: var(--font-semibold);
 }
 
+/* Voice: dictate + voice chat */
+.agent-client-voice-button {
+	width: 20px;
+	height: 20px;
+	padding: 0 !important;
+	margin: 0 !important;
+	border: none !important;
+	background-color: transparent !important;
+	box-shadow: none !important;
+	color: var(--text-muted);
+	cursor: pointer;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	flex-shrink: 0;
+}
+
+.agent-client-voice-button > span,
+.agent-client-voice-button svg {
+	display: flex;
+	width: 16px;
+	height: 16px;
+}
+
+.agent-client-voice-button:hover {
+	color: var(--text-normal);
+}
+
+.agent-client-voice-button:disabled {
+	cursor: not-allowed;
+	opacity: 0.5;
+}
+
+.agent-client-voice-button.agent-client-voice-active {
+	color: var(--interactive-accent);
+}
+
+.agent-client-voice-button.agent-client-voice-recording {
+	color: var(--color-red);
+	animation: agent-client-voice-pulse 1.2s ease-in-out infinite;
+}
+
+.agent-client-voice-button.agent-client-voice-unavailable {
+	color: var(--text-faint);
+}
+
+@keyframes agent-client-voice-pulse {
+	50% {
+		opacity: 0.4;
+	}
+}
+
+.agent-client-voice-status {
+	font-size: var(--font-smallest);
+	color: var(--text-muted);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	min-width: 0;
+}
+
+.agent-client-voice-status-clickable {
+	cursor: pointer;
+}
+
+.agent-client-voice-status.agent-client-voice-error {
+	color: var(--text-error);
+}
+
 /* Send button */
 .agent-client-chat-send-button {
 	width: 20px;
