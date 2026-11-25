@@ -1028,7 +1028,7 @@ If your plugin does not need CSS, delete this file.
 	background-color: transparent;
 	color: var(--interactive-accent-hover);
 	border-radius: 3px;
-	font-size: var(--font-text-size);
+	font-size: var(--font-ui-small);
 	font-weight: 500;
 	line-height: var(--line-height-normal);
 	cursor: pointer;
